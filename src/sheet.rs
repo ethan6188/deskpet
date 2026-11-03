@@ -14,6 +14,7 @@ use crate::pet::{Pet, Style};
 use crate::pose::{self, Pose};
 use crate::renderer::{FrameInput, Renderer};
 use crate::scene;
+use crate::splat;
 
 /// Backdrop behind the pet: mid gray, so both dark ink and white fur read.
 const BACKDROP: [u8; 3] = [58, 60, 70];
@@ -79,19 +80,21 @@ pub fn render(pet: &Pet, model: &Model, opts: &SheetOptions, out: &Path) -> Resu
     let mut styles = Vec::new();
     for name in &style_names {
         let style: Style = pet.style(Some(name))?;
-        let camera = scene::framing(model, &style, facing);
-        styles.push((name, style, camera));
+        let splats = splat::for_style(&pet.dir, model, &style)?;
+        let camera = scene::framing(model, &style, facing, scene::splat_reach(&splats));
+        styles.push((name, style, splats, camera));
     }
-    let aspect = styles.iter().map(|s| s.2.aspect).fold(0.2, f32::max);
+    let aspect = styles.iter().map(|s| s.3.aspect).fold(0.2, f32::max);
     let cell_w = ((opts.cell_height as f32 * aspect).round() as u32).max(16);
 
-    for (name, style, mut camera) in styles {
+    for (name, style, splats, mut camera) in styles {
         camera.aspect = aspect;
         let mut renderer = pollster::block_on(Renderer::offscreen(
             cell_w,
             opts.cell_height,
             model,
             style.clone(),
+            &splats,
             camera,
             height,
         ))?;

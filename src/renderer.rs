@@ -12,6 +12,7 @@ use winit::window::Window;
 use crate::camera::Camera;
 use crate::model::{Model, Texture, Vertex};
 use crate::pet::{Style, StyleKind};
+use crate::splat::{self, GpuSplat, Splat};
 
 const MSAA_SAMPLES: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -86,12 +87,38 @@ pub struct Renderer {
     material_groups: Vec<wgpu::BindGroup>,
     msaa_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
+    /// 4 for meshes; 1 for splats, which are already smooth Gaussians and would
+    /// only pay four times the blending for nothing.
+    samples: u32,
     pub camera: Camera,
     style: Style,
     /// Pet height in model units; style widths are fractions of it.
     height: f32,
     vertex_count: u32,
     morph_count: u32,
+    splats: Option<SplatPass>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SplatUniforms {
+    view: [[f32; 4]; 4],
+    focal_viewport: [f32; 4],
+    clip: [f32; 4],
+}
+
+/// The Gaussian splat path: drawn instead of the mesh for `kind = "splat"`.
+struct SplatPass {
+    pipeline: wgpu::RenderPipeline,
+    uniforms: wgpu::Buffer,
+    order_buffer: wgpu::Buffer,
+    group: wgpu::BindGroup,
+    /// CPU copy for sorting.
+    splats: Vec<GpuSplat>,
+    order: Vec<u32>,
+    keys: Vec<u32>,
+    /// What the current order was sorted for; unchanged inputs skip the sort.
+    sorted_for: Option<(Vec<Mat4>, Mat4)>,
 }
 
 /// Box-filtered mip chain, so a detailed texture stays sharp but never shimmers
@@ -192,6 +219,7 @@ impl Renderer {
         window: Arc<Window>,
         model: &Model,
         style: Style,
+        splats: &[Splat],
         camera: Camera,
         height: f32,
     ) -> Self {
@@ -237,6 +265,7 @@ impl Renderer {
             (w, h),
             model,
             style,
+            splats,
             camera,
             height,
         )
@@ -248,6 +277,7 @@ impl Renderer {
         height_px: u32,
         model: &Model,
         style: Style,
+        splats: &[Splat],
         camera: Camera,
         height: f32,
     ) -> Result<Self, String> {
@@ -268,6 +298,7 @@ impl Renderer {
             (width, height_px),
             model,
             style,
+            splats,
             camera,
             height,
         ))
@@ -321,6 +352,7 @@ impl Renderer {
         (width, height_px): (u32, u32),
         model: &Model,
         style: Style,
+        splats: &[Splat],
         camera: Camera,
         height: f32,
     ) -> Self {
@@ -528,13 +560,16 @@ impl Renderer {
             })
         };
         let main = pipeline("main", "vs_main", "fs_main", wgpu::Face::Back);
-        let outline = (style.kind != StyleKind::Real && style.outline > 0.0)
+        let splat_pass =
+            (!splats.is_empty()).then(|| Self::splat_pass(&device, &frame_layout, format, splats));
+        let outline = (style.kind == StyleKind::Anime && style.outline > 0.0)
             .then(|| pipeline("outline", "vs_outline", "fs_outline", wgpu::Face::Front));
         // Shells are seen from both sides at the silhouette.
         let fur = (style.kind == StyleKind::Real && style.fur > 0.0)
             .then(|| pipeline("fur", "vs_fur", "fs_fur", wgpu::Face::Back));
 
-        let (msaa_view, depth_view) = Self::attachments(&device, format, width, height_px);
+        let samples = if splats.is_empty() { MSAA_SAMPLES } else { 1 };
+        let (msaa_view, depth_view) = Self::attachments(&device, format, width, height_px, samples);
         Self {
             target,
             device,
@@ -563,11 +598,13 @@ impl Renderer {
             material_groups,
             msaa_view,
             depth_view,
+            samples,
             camera,
             style,
             height,
             vertex_count: model.vertices.len() as u32,
             morph_count: model.morph_names.len() as u32,
+            splats: splat_pass,
         }
     }
 
@@ -576,6 +613,7 @@ impl Renderer {
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        samples: u32,
     ) -> (wgpu::TextureView, wgpu::TextureView) {
         let size = wgpu::Extent3d {
             width,
@@ -588,7 +626,7 @@ impl Renderer {
                     label: Some(label),
                     size,
                     mip_level_count: 1,
-                    sample_count: MSAA_SAMPLES,
+                    sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
                     format,
                     // Apple GPUs are tile-based: MSAA samples and depth live in on-chip
@@ -621,7 +659,7 @@ impl Renderer {
             }
         }
         (self.msaa_view, self.depth_view) =
-            Self::attachments(&self.device, self.format, width, height);
+            Self::attachments(&self.device, self.format, width, height, self.samples);
     }
 
     /// Draws a frame and shows it in the window. Offscreen, it only draws.
@@ -726,7 +764,7 @@ impl Renderer {
     fn encode(&mut self, input: &FrameInput, view: &wgpu::TextureView) {
         let s = &self.style;
         let kind = match s.kind {
-            StyleKind::Real => 0,
+            StyleKind::Real | StyleKind::Splat => 0,
             StyleKind::Anime => 1,
         };
         let shells = if self.fur.is_some() { FUR_SHELLS } else { 0 };
@@ -759,17 +797,57 @@ impl Renderer {
             );
         }
 
+        if let Some(sp) = &mut self.splats {
+            let view = self.camera.view();
+            let view_model = view * input.model;
+            // An idle pet only breathes, a ~1.5% scale that can't reorder splats
+            // by more than a hair: when the skeleton hasn't moved, keep the order.
+            let same = sp.sorted_for.as_ref().is_some_and(|(j, vm)| {
+                j.as_slice() == input.joints
+                    && vm.abs_diff_eq(view_model, 0.02 * vm.w_axis.length())
+            });
+            if !same {
+                splat::sort_order(
+                    &sp.splats,
+                    input.joints,
+                    view_model,
+                    &mut sp.order,
+                    &mut sp.keys,
+                );
+                self.queue
+                    .write_buffer(&sp.order_buffer, 0, bytemuck::cast_slice(&sp.order));
+                sp.sorted_for = Some((input.joints.to_vec(), view_model));
+            }
+            let focal = self.camera.focal(self.height_px as f32);
+            let u = SplatUniforms {
+                view: view.to_cols_array_2d(),
+                focal_viewport: [focal, focal, self.width as f32, self.height_px as f32],
+                clip: [self.camera.near(), 0.0, 0.0, 0.0],
+            };
+            self.queue
+                .write_buffer(&sp.uniforms, 0, bytemuck::bytes_of(&u));
+        }
+
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pet pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.msaa_view,
+                    // Without MSAA, draw straight into the target.
+                    view: if self.samples > 1 {
+                        &self.msaa_view
+                    } else {
+                        view
+                    },
                     depth_slice: None,
-                    resolve_target: Some(view),
+                    resolve_target: (self.samples > 1).then_some(view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Discard,
+                        store: if self.samples > 1 {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -785,18 +863,31 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.frame_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            if let Some(sp) = &self.splats {
+                pass.set_pipeline(&sp.pipeline);
+                pass.set_bind_group(1, &sp.group, &[]);
+                pass.draw(0..6, 0..sp.order.len() as u32);
+            } else {
+                Self::draw_mesh(&mut pass, self, shells);
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+    }
+
+    fn draw_mesh(pass: &mut wgpu::RenderPass<'_>, r: &Renderer, shells: u32) {
+        {
+            pass.set_vertex_buffer(0, r.vertex_buffer.slice(..));
+            pass.set_index_buffer(r.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             let passes = [
-                (Some(&self.main), 1),
-                (self.outline.as_ref(), 1),
-                (self.fur.as_ref(), shells),
+                (Some(&r.main), 1),
+                (r.outline.as_ref(), 1),
+                (r.fur.as_ref(), shells),
             ];
             for (pipeline, instances) in passes {
                 let Some(pipeline) = pipeline else { continue };
                 pass.set_pipeline(pipeline);
-                for b in &self.batches {
-                    pass.set_bind_group(1, &self.material_groups[b.material], &[]);
+                for b in &r.batches {
+                    pass.set_bind_group(1, &r.material_groups[b.material], &[]);
                     pass.draw_indexed(
                         b.first_index..b.first_index + b.index_count,
                         0,
@@ -805,6 +896,107 @@ impl Renderer {
                 }
             }
         }
-        self.queue.submit([encoder.finish()]);
+    }
+
+    fn splat_pass(
+        device: &wgpu::Device,
+        frame_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+        splats: &[Splat],
+    ) -> SplatPass {
+        let gpu: Vec<GpuSplat> = splats.iter().map(Splat::gpu).collect();
+        let splat_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("splats"),
+            contents: bytemuck::cast_slice(&gpu),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let order: Vec<u32> = (0..gpu.len() as u32).collect();
+        let order_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("splat order"),
+            contents: bytemuck::cast_slice(&order),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("splat uniforms"),
+            size: std::mem::size_of::<SplatUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("splat layout"),
+            entries: &[uniform_entry(0), storage_entry(1), storage_entry(2)],
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splats"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: splat_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: order_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("splat shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("splat.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("splat pipeline layout"),
+            bind_group_layouts: &[Some(frame_layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("splats"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_splat"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            // Sorted and blended: no depth writes, but the pass has a depth target.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                ..Default::default()
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_splat"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        SplatPass {
+            pipeline,
+            uniforms,
+            order_buffer,
+            group,
+            splats: gpu,
+            order,
+            keys: Vec::new(),
+            sorted_for: None,
+        }
     }
 }

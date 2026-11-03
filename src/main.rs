@@ -13,6 +13,7 @@ mod scaffold;
 mod scene;
 mod schedule;
 mod sheet;
+mod splat;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +51,7 @@ struct App {
     model: Model,
     pet: Pet,
     style: Style,
+    splats: Vec<splat::Splat>,
     behavior: Behavior,
     facing: Quat,
     camera: Option<Camera>,
@@ -76,12 +78,14 @@ impl App {
         let style = pet.style(opts.style.as_deref())?;
         let model = model::load(&pet.model_path())?;
         let behavior = Behavior::new(&model, &pet.manifest)?;
+        let splats = splat::for_style(&pet.dir, &model, &style)?;
         let facing = Quat::from_rotation_y(pet.manifest.facing.to_radians());
         let now = Instant::now();
         Ok(Self {
             pose: Pose::rest(&model),
             model,
             style,
+            splats,
             behavior,
             facing,
             camera: None,
@@ -181,7 +185,12 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let camera = scene::framing(&self.model, &self.style, self.facing);
+        let camera = scene::framing(
+            &self.model,
+            &self.style,
+            self.facing,
+            scene::splat_reach(&self.splats),
+        );
         let height = self.pet.manifest.height as f64;
         let attrs = WindowAttributes::default()
             .with_title(&self.pet.manifest.name)
@@ -193,11 +202,17 @@ impl ApplicationHandler for App {
             .with_window_level(WindowLevel::AlwaysOnTop);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.height = scene::model_height(&self.model);
-        let render_camera = scene::framing(&self.model, &self.style, self.facing);
+        let render_camera = scene::framing(
+            &self.model,
+            &self.style,
+            self.facing,
+            scene::splat_reach(&self.splats),
+        );
         self.renderer = Some(pollster::block_on(Renderer::new(
             window.clone(),
             &self.model,
             self.style.clone(),
+            &self.splats,
             render_camera,
             self.height,
         )));
@@ -311,7 +326,10 @@ usage:
   deskpet check DIR [--json] [--scale N]
       Check a pet package. Exit status 1 on errors, 0 otherwise.
   deskpet new DIR --model FILE.glb [--name NAME]
-      Make a pet package from a glTF binary, with guessed settings to confirm.";
+      Make a pet package from a glTF binary, with guessed settings to confirm.
+  deskpet bake-splats DIR [--count N] [--out FILE.ply]
+      Cover the model with Gaussian splats colored by its textures, to try the
+      splat style before a real capture exists. Adds a [styles.splat] if missing.";
 
 fn usage() -> ! {
     eprintln!("{USAGE}");
@@ -460,10 +478,49 @@ fn new_pet(dir: PathBuf, flags: Vec<(String, String)>) {
     );
 }
 
+fn bake_splats(dir: PathBuf, flags: Vec<(String, String)>) {
+    let mut count = 200_000usize;
+    let mut out = PathBuf::from("splats.ply");
+    for (k, v) in flags {
+        match k.as_str() {
+            "--count" => count = v.parse().unwrap_or_else(|_| usage()),
+            "--out" => out = PathBuf::from(v),
+            _ => usage(),
+        }
+    }
+    let pet = Pet::open(&dir).unwrap_or_else(|e| fail(e));
+    let model = model::load(&pet.model_path()).unwrap_or_else(|e| fail(e));
+    let splats = splat::bake(&model, count);
+    if splats.is_empty() {
+        fail("the model has no surface to cover".into());
+    }
+    splat::write_ply(&dir.join(&out), &splats).unwrap_or_else(|e| fail(e));
+    if !pet
+        .manifest
+        .styles
+        .values()
+        .any(|s| s.kind == pet::StyleKind::Splat)
+    {
+        let toml = dir.join("pet.toml");
+        let mut text = std::fs::read_to_string(&toml).unwrap_or_else(|e| fail(e.to_string()));
+        text += &format!(
+            "\n[styles.splat]\nkind = \"splat\"\nsplats = \"{}\"\n",
+            out.display()
+        );
+        std::fs::write(&toml, text).unwrap_or_else(|e| fail(e.to_string()));
+    }
+    println!(
+        "{}: {} splats. Try: deskpet render {} --style splat",
+        dir.join(&out).display(),
+        splats.len(),
+        dir.display()
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1).peekable();
     let command = match args.peek().map(String::as_str) {
-        Some("run" | "render" | "check" | "new") => args.next(),
+        Some("run" | "render" | "check" | "new" | "bake-splats") => args.next(),
         _ => None,
     };
     let (positional, flags) = split_args(args, &["--json"]);
@@ -476,6 +533,7 @@ fn main() {
         Some("render") => render_sheet(one_dir(positional), flags),
         Some("check") => check_pet(one_dir(positional), flags),
         Some("new") => new_pet(one_dir(positional), flags),
+        Some("bake-splats") => bake_splats(one_dir(positional), flags),
         _ => usage(),
     }
 }

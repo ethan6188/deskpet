@@ -50,6 +50,19 @@ impl Camera {
         }
     }
 
+    pub fn view(&self) -> Mat4 {
+        glam::camera::rh::view::look_at_mat4(self.eye, self.target, Vec3::Y)
+    }
+
+    /// Focal length in pixels for a viewport `height` pixels tall.
+    pub fn focal(&self, height: f32) -> f32 {
+        height * 0.5 / (self.fov_y * 0.5).tan()
+    }
+
+    pub fn near(&self) -> f32 {
+        self.near
+    }
+
     pub fn view_proj(&self) -> Mat4 {
         let proj = glam::camera::rh::proj::directx::perspective(
             self.fov_y,

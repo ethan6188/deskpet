@@ -8,7 +8,7 @@ compatibility: macOS with a Metal GPU, Rust stable. Run from a deskpet checkout.
 
 A pet is a directory: `pet.toml`, a glTF binary (`.glb`) and `LICENSE.md`. The engine draws it at native
 Retina resolution in a transparent always-on-top window, in one of two styles: `real` (soft fur-like
-shading plus shell fur) or `anime` (cel bands plus ink outline).
+shading plus shell fur), `anime` (cel bands plus ink outline) or `splat` (skinned Gaussian splats).
 
 The method: you can't judge a pet from its numbers. Render it, open the PNG, look, change one thing,
 render again. `check` catches what eyes miss; the contact sheet catches what checks miss.
@@ -82,6 +82,19 @@ In `[styles.<name>]`:
 Fur suits soft, dense models; on low-poly ones it reads as fuzz, so keep it short. Outlines that look
 broken at creases mean the model has split normals at hard edges; deskpet already welds them for the
 outline, so it's usually the width that's too large.
+
+## 4b. Gaussian splats (photographic look)
+
+A `kind = "splat"` style draws a 3DGS point cloud (binary PLY) bound to the model's skeleton instead of the
+mesh. The glTF still provides skeleton, clips and click-through.
+
+- Without a capture, `deskpet bake-splats pets/<name> --count 60000` makes one from the textures and adds
+  `[styles.splat]`. It proves the pipeline; it doesn't look better than the mesh.
+- With a capture (e.g. trained with Brush): crop the background first, copy the `.ply` into the package,
+  set `splats = "file.ply"`, then fit `splat_scale`, `splat_rotate` (degrees X, Y, Z) and `splat_offset`
+  until the splat turntable lines up with the `real` turntable. `check` says what share of splats sit far
+  from the mesh: above 1% the alignment is wrong or background is left.
+- Keep under 300k splats; `check` prints the CPU sort time per frame.
 
 ## 5. Behavior
 

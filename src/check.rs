@@ -13,6 +13,7 @@ use crate::pet::Pet;
 use crate::pose::{self, Pose};
 use crate::renderer::{FrameInput, Renderer};
 use crate::scene;
+use crate::splat::{self, Splat};
 
 /// Triangles above which a pet is too heavy for an all-day desktop pet.
 const TRIANGLES_WARN: usize = 60_000;
@@ -28,6 +29,12 @@ const SEAM_WARN: f32 = 0.02;
 /// Largest jump between the idle start and another clip's start before the
 /// crossfade can no longer hide it.
 const ENTRY_WARN: f32 = 0.25;
+/// Splats the CPU can sort per frame within budget on a laptop.
+const SPLATS_WARN: usize = 300_000;
+const SPLATS_ERROR: usize = 1_500_000;
+/// A splat bound farther than this (fraction of height) from the mesh is
+/// probably background or a floater, and won't follow the skeleton well.
+const BIND_WARN: f32 = 0.05;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Level {
@@ -344,7 +351,17 @@ fn check_cost(pet: &Pet, model: &Model, window_scale: f32, f: &mut Findings) {
     }
 
     for (name, style) in &pet.manifest.styles {
-        let camera = scene::framing(model, style, facing);
+        let splats = match splat::for_style(&pet.dir, model, style) {
+            Ok(s) => s,
+            Err(e) => {
+                f.add(Level::Error, "splats", format!("style \"{name}\": {e}"));
+                continue;
+            }
+        };
+        if !splats.is_empty() {
+            check_splats(name, &splats, height, edge_p95(model), f);
+        }
+        let camera = scene::framing(model, style, facing, scene::splat_reach(&splats));
         let h = (pet.manifest.height * window_scale).round() as u32;
         let w = (h as f32 * camera.aspect).round() as u32;
         let mut r = match pollster::block_on(Renderer::offscreen(
@@ -352,6 +369,7 @@ fn check_cost(pet: &Pet, model: &Model, window_scale: f32, f: &mut Findings) {
             h,
             model,
             style.clone(),
+            &splats,
             camera,
             height,
         )) {
@@ -413,4 +431,70 @@ fn check_cost(pet: &Pet, model: &Model, window_scale: f32, f: &mut Findings) {
             f.add(Level::Warn, "framing", format!("style \"{name}\": the pet fills only {:.0}% of its window; a clip may wander far", coverage * 100.0));
         }
     }
+}
+
+fn check_splats(name: &str, splats: &[Splat], height: f32, edge: f32, f: &mut Findings) {
+    let n = splats.len();
+    let level = if n > SPLATS_ERROR {
+        Level::Error
+    } else if n > SPLATS_WARN {
+        Level::Warn
+    } else {
+        Level::Ok
+    };
+    let gpu: Vec<_> = splats.iter().map(Splat::gpu).collect();
+    let joints = splats.iter().flat_map(|s| s.joints).max().unwrap_or(0) as usize + 1;
+    let identity = vec![glam::Mat4::IDENTITY; joints];
+    let (mut order, mut keys) = (Vec::new(), Vec::new());
+    let started = Instant::now();
+    for _ in 0..5 {
+        splat::sort_order(&gpu, &identity, glam::Mat4::IDENTITY, &mut order, &mut keys);
+    }
+    let sort = started.elapsed() / 5;
+    f.add(
+        level,
+        "splats",
+        format!("style \"{name}\": {n} splats, CPU depth sort {sort:.2?} per frame"),
+    );
+    // Splats bind to the nearest vertex, so on a coarse mesh even surface
+    // splats sit up to about an edge length away.
+    let limit = (BIND_WARN * height).max(edge);
+    let far = splats.iter().filter(|s| s.bind_distance > limit).count();
+    let share = far as f32 / n as f32;
+    if share > 0.01 {
+        f.add(
+            Level::Warn,
+            "splats",
+            format!(
+                "style \"{name}\": {:.1}% of splats sit more than {:.0}% of the height from the mesh; check splat_scale, splat_rotate and splat_offset, or crop the background",
+                share * 100.0,
+                BIND_WARN * 100.0
+            ),
+        );
+    } else {
+        f.add(
+            Level::Ok,
+            "splats",
+            format!("style \"{name}\": splats line up with the mesh"),
+        );
+    }
+}
+
+/// 95th-percentile triangle edge length in the rest pose: a splat on a big
+/// triangle can sit that far from every vertex.
+fn edge_p95(model: &Model) -> f32 {
+    let p = pose::skinned_positions(model, &Pose::rest(model));
+    let mut e: Vec<f32> = model
+        .indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|t| [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])])
+        .map(|(a, b)| p[a as usize].distance(p[b as usize]))
+        .collect();
+    if e.is_empty() {
+        return 0.0;
+    }
+    let k = e.len() * 95 / 100;
+    *e.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
 }

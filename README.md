@@ -8,7 +8,7 @@
 
 ```bash
 cargo run --release                                  # 默认 pets/fox，实物风格
-cargo run --release -- --style anime                 # real | anime
+cargo run --release -- --style anime                 # real | anime | splat
 cargo run --release -- --pet pets/fox --power eco    # eco | balanced | smooth
 ```
 
@@ -18,6 +18,7 @@ cargo run --release -- --pet pets/fox --power eco    # eco | balanced | smooth
 deskpet new pets/cat --model cat.glb --name 猫     # 从 glb 生成宠物包，猜测项标 GUESS
 deskpet check pets/cat                           # 检查资产和预算；--json 给程序读，出错退出码 1
 deskpet render pets/cat                          # 渲染联系表 pets/cat/contact.png
+deskpet bake-splats pets/cat --count 60000       # 用模型贴图铺一层高斯点，先试 splat 风格
 ```
 
 联系表每种风格一组：一圈 360° 转台、每个动画一行（首帧到末帧）、头部朝四个方向看和眨眼。`check` 检查清单名字、授权、面数和贴图、蒙皮权重、待机循环接缝、动作切换跳变、每帧 GPU 耗时、宠物在窗口里的占比。
@@ -40,7 +41,7 @@ deskpet render pets/cat                          # 渲染联系表 pets/cat/cont
 | `style` | 默认风格名 |
 | `[animations]` | `idle` 待机循环、`fidget` 空闲时随机穿插的小动作、`react` 点击反应，填 glTF 动画名 |
 | `[rig]` | `head` 跟随鼠标转动的骨骼、`look_limit` 最大转角、`blink` 闭眼用的 morph target |
-| `[styles.<名字>]` | `kind`（real / anime）、`tint`、`outline`、`outline_color`、`fur`、`glow`、`bands` |
+| `[styles.<名字>]` | `kind`（real / anime / splat）、`tint`、`outline`、`outline_color`、`fur`、`glow`、`bands`；splat 另有 `splats`、`splat_scale`、`splat_rotate`、`splat_offset` |
 
 名字写错（动画、骨骼、morph、风格）启动时就会报错并指出是哪一项。
 
@@ -61,7 +62,16 @@ deskpet render pets/cat                          # 渲染联系表 pets/cat/cont
 | `balanced`（默认） | 60 / 24 / 8 |
 | `smooth` | 120 / 30 / 10 |
 
-实测（M 系列，release，狐狸 1728 顶点，空闲 10 秒平均）：balanced 两种风格都在 4%–5% CPU，eco 2%，内存约 80–90 MB。
+实测（Apple M3，release，狐狸 1728 顶点，空闲 15 秒平均）：balanced 下 real 和 anime 约 1.9% CPU，splat（6 万点）约 3.7%，eco 约 1.2%。
+
+## 高斯泼溅（splat 风格）
+
+`kind = "splat"` 的风格不画网格，改画 3D 高斯点（标准 3DGS 二进制 PLY，取 0 阶球谐颜色）。glTF 仍提供骨骼、动画和点击穿透用的网格：
+
+- 加载时按 `splat_scale`、`splat_rotate`、`splat_offset` 把点云对齐到模型的静止姿势，再把每个点绑到最近的顶点，继承它的骨骼和权重，GPU 上和顶点一样蒙皮。
+- 每帧在 CPU 上按深度做基数排序（6 万点约 0.5 ms），骨骼没动时跳过排序；GPU 上把协方差投影成屏幕椭圆（EWA），四边形大小按不透明度截到 1/255，从后往前预乘混合。splat 风格不开 MSAA。
+- 真实拍摄的点云可以用 [Brush](https://github.com/ArthurBrussee/brush) 等工具重建，裁掉背景、对齐到模型后放进宠物包。`check` 会报告点数、排序耗时和多少点离网格太远（对齐错了或带了背景）。
+- 示例狐狸的 `splats.ply` 是 `bake-splats` 从低多边形贴图生成的，只用来验证管线，画质不代表真实拍摄。
 
 ## 素材授权
 

@@ -12,6 +12,8 @@ pub enum StyleKind {
     Real,
     /// Banded cel shading with ink outlines.
     Anime,
+    /// 3D Gaussian splats bound to the model's skeleton.
+    Splat,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -35,6 +37,20 @@ pub struct Style {
     /// Number of cel bands (anime).
     #[serde(default = "default_bands")]
     pub bands: u32,
+    /// Splat file (binary PLY), relative to the pet directory (splat).
+    pub splats: Option<PathBuf>,
+    /// Scale, rotation (degrees about X, Y, Z) and offset that put the splats
+    /// over the model's rest pose (splat).
+    #[serde(default = "one")]
+    pub splat_scale: f32,
+    #[serde(default)]
+    pub splat_rotate: [f32; 3],
+    #[serde(default)]
+    pub splat_offset: [f32; 3],
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 fn white() -> [f32; 3] {

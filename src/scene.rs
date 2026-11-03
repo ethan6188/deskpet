@@ -7,6 +7,7 @@ use crate::camera::Camera;
 use crate::model::Model;
 use crate::pet::Style;
 use crate::pose::{self, Pose};
+use crate::splat::Splat;
 
 /// Samples per clip when measuring how far the pet moves.
 const BOUNDS_SAMPLES: usize = 12;
@@ -26,7 +27,8 @@ const FRAMING_YAWS: usize = 8;
 
 /// A camera that keeps the pet in frame through every clip, at any spin, as
 /// tightly as the projection allows.
-pub fn framing(model: &Model, style: &Style, facing: Quat) -> Camera {
+/// `extra` pads the bounds, in model units, for anything drawn beyond the mesh.
+pub fn framing(model: &Model, style: &Style, facing: Quat, extra: f32) -> Camera {
     let mut points = Vec::new();
     let mut poses = vec![Pose::rest(model)];
     for clip in &model.clips {
@@ -39,7 +41,7 @@ pub fn framing(model: &Model, style: &Style, facing: Quat) -> Camera {
     }
     // Corners of each pose's box are enough, and keep this fast for big meshes.
     let height = model_height(model);
-    let pad = style.fur.max(style.outline) * height;
+    let pad = style.fur.max(style.outline) * height + extra;
     for pose in &poses {
         let (lo, hi) = pose::skinned_positions(model, pose).iter().fold(
             (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
@@ -71,4 +73,16 @@ pub fn placement(yaw: f32, facing: Quat, breath_phase: f32) -> Mat4 {
     let b = 1.0 + 0.015 * breath_phase.sin();
     Mat4::from_quat(Quat::from_rotation_y(yaw) * facing)
         * Mat4::from_scale(Vec3::new(1.0 / b.sqrt(), b, 1.0 / b.sqrt()))
+}
+
+/// How far splats reach beyond the mesh's box, at 2 sigma.
+pub fn splat_reach(splats: &[Splat]) -> f32 {
+    let mut reach: Vec<f32> = splats.iter().map(|s| s.overhang).collect();
+    if reach.is_empty() {
+        return 0.0;
+    }
+    // Ignore the farthest 0.5%: stray floaters shouldn't blow up the window.
+    let k = (reach.len() as f32 * 0.995) as usize;
+    let k = k.min(reach.len() - 1);
+    *reach.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
 }
