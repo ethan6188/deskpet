@@ -86,12 +86,19 @@ impl Scheduler {
         }
     }
 
-    /// Returns true if a frame is due now, and advances the deadline.
-    pub fn frame_due(&mut self, now: Instant) -> bool {
+    /// Returns true if a frame is due now, and advances the deadline. `busy`
+    /// means a clip is playing that needs full frame rate, without counting as
+    /// user input (so the pet can still doze off afterwards).
+    pub fn frame_due(&mut self, now: Instant, busy: bool) -> bool {
         if now < self.next_frame {
             return false;
         }
-        let period = Duration::from_secs_f64(1.0 / self.profile.fps(self.activity()) as f64);
+        let activity = if busy {
+            Activity::Active
+        } else {
+            self.activity()
+        };
+        let period = Duration::from_secs_f64(1.0 / self.profile.fps(activity) as f64);
         // Advance on a fixed grid so timing doesn't drift; resync after a stall.
         self.next_frame += period;
         if self.next_frame < now {
@@ -113,18 +120,18 @@ mod tests {
     fn frames_are_not_due_before_the_deadline() {
         let mut s = Scheduler::new(PowerProfile::Eco);
         let t0 = Instant::now();
-        assert!(s.frame_due(t0));
-        assert!(!s.frame_due(t0 + Duration::from_millis(5)));
-        assert!(s.frame_due(t0 + Duration::from_millis(40)));
+        assert!(s.frame_due(t0, false));
+        assert!(!s.frame_due(t0 + Duration::from_millis(5), false));
+        assert!(s.frame_due(t0 + Duration::from_millis(40), false));
     }
 
     #[test]
     fn a_stall_resyncs_instead_of_bursting() {
         let mut s = Scheduler::new(PowerProfile::Eco);
         let t0 = Instant::now();
-        assert!(s.frame_due(t0));
+        assert!(s.frame_due(t0, false));
         let late = t0 + Duration::from_secs(1);
-        assert!(s.frame_due(late));
-        assert!(!s.frame_due(late + Duration::from_millis(1)));
+        assert!(s.frame_due(late, false));
+        assert!(!s.frame_due(late + Duration::from_millis(1), false));
     }
 }

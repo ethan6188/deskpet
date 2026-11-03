@@ -2,40 +2,41 @@
 
 use glam::{Mat4, Vec2, Vec3};
 
-/// Extra room around the pet for breathing, squash and stretch.
-const MARGIN: f32 = 1.12;
-const FOV_Y: f32 = 30.0;
+/// Extra room around the pet for animation, fur and outlines.
+const MARGIN: f32 = 1.1;
+const FOV_Y: f32 = 25.0;
 
 pub struct Camera {
     pub eye: Vec3,
     pub target: Vec3,
     pub aspect: f32,
+    fov_y: f32,
     near: f32,
     far: f32,
 }
 
 impl Camera {
-    /// Frames a pet with the given bounds from the front. The pet spins about Y,
-    /// so the width covers the largest horizontal radius at any angle.
+    /// Frames everything in `lo..hi` (already in camera-facing world space)
+    /// from the front.
     pub fn fit(lo: Vec3, hi: Vec3) -> Self {
-        let center_y = (lo.y + hi.y) * 0.5;
-        let half_h = (hi.y - lo.y) * 0.5 * MARGIN;
-        let radius_xz = Vec2::new(lo.x.abs().max(hi.x.abs()), lo.z.abs().max(hi.z.abs())).length();
-        let half_w = radius_xz * MARGIN;
-        let distance = half_h / (FOV_Y.to_radians() * 0.5).tan() + radius_xz;
-        let target = Vec3::new(0.0, center_y, 0.0);
+        let center = (lo + hi) * 0.5;
+        let half = (hi - lo) * 0.5 * MARGIN;
+        let fov_y = FOV_Y.to_radians();
+        let distance = half.y / (fov_y * 0.5).tan() + half.z;
+        let target = Vec3::new(center.x, center.y, center.z);
         Self {
             eye: target + Vec3::new(0.0, 0.0, distance),
             target,
-            aspect: half_w / half_h,
-            near: (distance - radius_xz * 2.0).max(0.05),
-            far: distance + radius_xz * 2.0,
+            aspect: (half.x / half.y).max(0.2),
+            fov_y,
+            near: (distance - half.z * 2.0).max(distance * 0.05),
+            far: distance + half.z * 2.0,
         }
     }
 
     pub fn view_proj(&self) -> Mat4 {
         let proj = glam::camera::rh::proj::directx::perspective(
-            FOV_Y.to_radians(),
+            self.fov_y,
             self.aspect,
             self.near,
             self.far,
