@@ -26,8 +26,10 @@ struct Frame {
 
 struct Material {
     base_color: vec4<f32>,
-    // x: 1 if the base color texture is present.
+    // x: 1 if the base color texture is present, y: 1 for a procedural eye.
     flags: vec4<u32>,
+    // Procedural eye: x iris size, y pupil size (of the iris), z pupil aspect.
+    eye: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> f: Frame;
@@ -163,11 +165,58 @@ fn shade_anime(base: vec3<f32>, n: vec3<f32>, l: vec3<f32>, v: vec3<f32>) -> vec
     return base * light * shadow_tint + vec3<f32>(highlight) + rim * f.glow.rgb;
 }
 
+// The eye, drawn on its front hemisphere. UVs are the disk coordinates in
+// -1..1 (y up); the iris slides towards the gaze.
+fn shade_eye(in: VsOut, n: vec3<f32>, l: vec3<f32>, v: vec3<f32>, anime: bool) -> vec3<f32> {
+    if (in.uv.y < -1.5) {
+        return vec3<f32>(0.02);
+    }
+    let gaze = clamp(f.params.zw, vec2<f32>(-1.0), vec2<f32>(1.0)) * vec2<f32>(0.22, 0.16);
+    let p = in.uv - gaze;
+    let iris_r = mat.eye.x;
+    let r = length(p) / iris_r;
+    let pupil = mat.eye.y;
+    // Pupil: an ellipse, a slit when the aspect is small.
+    let pp = p / iris_r / vec2<f32>(max(mat.eye.z, 0.05), 1.0);
+    let in_pupil = length(pp) < pupil;
+    let aa = fwidth(r) * 1.5;
+    let iris = mat.base_color.rgb;
+    // Iris: dark limbal ring outside, lighter towards the pupil, fine radial fibers.
+    let angle = atan2(p.y, p.x);
+    let fibers = 0.9 + 0.1 * sin(angle * 37.0) * sin(angle * 13.0 + r * 9.0);
+    var c = mix(iris * 1.3, iris * 0.6, smoothstep(0.3, 0.9, r)) * fibers;
+    // Dark limbal ring: the single biggest cue that an eye is an eye.
+    c *= mix(1.0, 0.25, smoothstep(0.82, 0.98, r));
+    // Sclera: barely visible, as in most animals; warm and shadowed.
+    let sclera = vec3<f32>(0.08, 0.05, 0.04);
+    c = mix(c, sclera, smoothstep(1.0 - aa, 1.0 + aa, r));
+    let pupil_edge = smoothstep(pupil - fwidth(length(pp)) * 1.5, pupil + fwidth(length(pp)) * 1.5, length(pp));
+    c = mix(vec3<f32>(0.01, 0.008, 0.008), c, pupil_edge);
+    // Upper lid shadow: the top of the eye sits under the brow.
+    c *= mix(0.55, 1.0, smoothstep(0.85, 0.2, in.uv.y));
+    // Catchlights are fixed on the eye, not on the iris: they are reflections.
+    let k1 = length(in.uv - vec2<f32>(-0.28, 0.32));
+    let k2 = length(in.uv - vec2<f32>(0.22, -0.18));
+    var spark = 0.0;
+    if (anime) {
+        spark = smoothstep(0.2, 0.17, k1) + smoothstep(0.09, 0.07, k2) * 0.8;
+    } else {
+        spark = smoothstep(0.13, 0.07, k1) + smoothstep(0.05, 0.03, k2) * 0.5;
+    }
+    let diffuse = max(dot(n, l), 0.0) * 0.4 + 0.6;
+    // A wet, glossy cornea.
+    let gloss = select(specular(n, l, v, 0.12) * 1.5, 0.0, anime);
+    return c * diffuse + vec3<f32>(spark + gloss);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let l = normalize(f.light.xyz);
     let v = normalize(f.eye.xyz - in.world);
+    if (mat.flags.y == 1u) {
+        return vec4<f32>(shade_eye(in, n, l, v, f.counts.w == KIND_ANIME), 1.0);
+    }
     let base = albedo(in.uv);
     switch f.counts.w {
         case KIND_ANIME: {
@@ -183,11 +232,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_outline(in: VsOut) -> @location(0) vec4<f32> {
+    // The eye's own shell would float as a ring when the lids close.
+    if (mat.flags.y == 1u) {
+        discard;
+    }
     return vec4<f32>(f.outline.rgb, 1.0);
 }
 
 @fragment
 fn fs_fur(in: VsOut) -> @location(0) vec4<f32> {
+    // No fur on eyes.
+    if (mat.flags.y == 1u) {
+        discard;
+    }
     // Strands: a cell grid over the UVs, each cell a hair of random length that tapers.
     let density = 320.0;
     let cell = floor(in.uv * density);

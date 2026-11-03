@@ -113,10 +113,54 @@ pub struct Manifest {
     pub animations: Animations,
     #[serde(default)]
     pub rig: Rig,
+    /// Procedural eyes on `rig.head`, for models whose eyes are missing or flat.
+    pub eyes: Option<Eyes>,
     /// Name of the style used when none is asked for.
     pub style: String,
     /// Every style this pet supports, by name.
     pub styles: BTreeMap<String, Style>,
+}
+
+/// Two procedural eyes, mirrored across x = 0, in the rest pose's model space.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Eyes {
+    /// Center of the eye on the +x side.
+    pub center: [f32; 3],
+    /// Direction that eye looks out of the head.
+    #[serde(default = "forward")]
+    pub forward: [f32; 3],
+    pub radius: f32,
+    /// Height as a fraction of width: below 1 for almond eyes.
+    #[serde(default = "eye_height")]
+    pub height: f32,
+    #[serde(default = "amber")]
+    pub iris: [f32; 3],
+    /// Iris radius as a fraction of the eye.
+    #[serde(default = "iris_size")]
+    pub iris_size: f32,
+    /// Pupil radius as a fraction of the iris.
+    #[serde(default = "pupil")]
+    pub pupil: f32,
+    /// Pupil width over height: 1 is round, small values are slits.
+    #[serde(default = "one")]
+    pub pupil_aspect: f32,
+}
+
+fn forward() -> [f32; 3] {
+    [0.0, 0.0, 1.0]
+}
+fn eye_height() -> f32 {
+    0.8
+}
+fn amber() -> [f32; 3] {
+    [0.85, 0.52, 0.12]
+}
+fn iris_size() -> f32 {
+    0.82
+}
+fn pupil() -> f32 {
+    0.42
 }
 
 fn default_height() -> f32 {
@@ -155,6 +199,24 @@ impl Pet {
             let known: Vec<_> = self.manifest.styles.keys().map(String::as_str).collect();
             format!("no style \"{name}\"; this pet has {}", known.join(", "))
         })
+    }
+
+    /// The model with everything the manifest adds to it, such as eyes.
+    pub fn load_model(&self) -> Result<crate::model::Model, String> {
+        let mut model = crate::model::load(&self.model_path())?;
+        if let Some(eyes) = &self.manifest.eyes {
+            let head = self
+                .manifest
+                .rig
+                .head
+                .as_deref()
+                .ok_or("[eyes] needs rig.head")?;
+            let node = model
+                .node(head)
+                .ok_or_else(|| format!("rig.head \"{head}\" is not a node"))?;
+            crate::eyes::add(&mut model, eyes, node);
+        }
+        Ok(model)
     }
 
     pub fn model_path(&self) -> PathBuf {

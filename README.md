@@ -40,6 +40,7 @@ deskpet bake-splats pets/cat --count 60000       # 用模型贴图铺一层高�
 | `height` | 窗口高度（点） |
 | `style` | 默认风格名 |
 | `[animations]` | `idle` 待机循环、`fidget` 空闲时随机穿插的小动作、`react` 点击反应，填 glTF 动画名 |
+| `[eyes]` | 程序化眼睛：位置、朝向、大小、虹膜颜色、瞳孔大小和形状；自动镜像、绑定头部、跟随光标、眨眼 |
 | `[rig]` | `head` 跟随鼠标转动的骨骼、`look_limit` 最大转角、`blink` 闭眼用的 morph target |
 | `[styles.<名字>]` | `kind`（real / anime / splat）、`tint`、`outline`、`outline_color`、`fur`、`glow`、`bands`；splat 另有 `splats`、`splat_scale`、`splat_rotate`、`splat_offset` |
 
@@ -63,6 +64,8 @@ deskpet bake-splats pets/cat --count 60000       # 用模型贴图铺一层高�
 | `smooth` | 120 / 30 / 10 |
 
 实测（Apple M3，release，狐狸 1728 顶点，空闲 15 秒平均）：balanced 下 real 和 anime 约 1.9% CPU，splat（6 万点）约 3.7%，eco 约 1.2%。
+
+![程序化眼睛：睁眼和眨眼](docs/eyes.png)
 
 ## 高斯泼溅（splat 风格）
 

@@ -17,6 +17,16 @@ head = "b_Head_05"
 look_limit = 30
 
 
+# The fox model has no real eyes; these are drawn by deskpet on the head joint.
+[eyes]
+center = [4.6, 60.0, 57.0]
+forward = [0.55, 0.12, 0.83]
+radius = 3.0
+height = 0.68
+iris = [0.85, 0.5, 0.1]
+pupil_aspect = 0.45
+iris_size = 0.96
+
 [styles.real]
 kind = "real"
 fur = 0.014

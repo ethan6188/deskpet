@@ -102,7 +102,8 @@ impl Behavior {
                     )
                 })
             })
-            .transpose()?;
+            .transpose()?
+            .or_else(|| model.morph(crate::eyes::BLINK_MORPH));
         let idle = opt(&a.idle)?;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -153,6 +154,11 @@ impl Behavior {
         }
         // A click always gets a blink, even without a reaction clip.
         self.blink_t = 0.0;
+    }
+
+    /// Where the eyes look, -1..1 with y up.
+    pub fn gaze(&self) -> Vec2 {
+        self.gaze.clamp(Vec2::splat(-1.0), Vec2::splat(1.0))
     }
 
     /// Whether anything is moving that needs frames, beyond breathing.

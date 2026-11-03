@@ -124,7 +124,7 @@ pub fn run(dir: &Path, window_scale: f32) -> Findings {
         );
     }
 
-    let model = match model::load(&pet.model_path()) {
+    let model = match pet.load_model() {
         Ok(m) => m,
         Err(e) => {
             f.add(Level::Error, "model", e);
@@ -239,7 +239,7 @@ pub fn run(dir: &Path, window_scale: f32) -> Findings {
             "no rig.head: the pet won't look at the cursor",
         );
     }
-    if pet.manifest.rig.blink.is_none() {
+    if pet.manifest.rig.blink.is_none() && pet.manifest.eyes.is_none() {
         f.add(
             Level::Warn,
             "rig",
@@ -420,6 +420,7 @@ fn check_cost(pet: &Pet, model: &Model, window_scale: f32, f: &mut Findings) {
             joints: &joints,
             morphs: &rest.morphs,
             time: 0.0,
+            gaze: glam::Vec2::ZERO,
         };
         let mut times = Vec::new();
         let mut coverage = 0.0;

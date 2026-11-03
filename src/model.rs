@@ -33,6 +33,8 @@ pub struct Texture {
 pub struct Material {
     pub base_color: [f32; 4],
     pub texture: Option<usize>,
+    /// Procedural eye: iris size, pupil size, pupil aspect. Base color is the iris.
+    pub eye: Option<[f32; 4]>,
 }
 
 pub struct Primitive {
@@ -193,6 +195,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
                 texture: pbr
                     .base_color_texture()
                     .map(|t| t.texture().source().index()),
+                eye: None,
             }
         })
         .collect();
@@ -200,6 +203,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
     materials.push(Material {
         base_color: [0.8, 0.8, 0.8, 1.0],
         texture: None,
+        eye: None,
     });
 
     let gnodes: Vec<gltf::Node> = doc.nodes().collect();

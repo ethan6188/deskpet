@@ -38,6 +38,7 @@ struct FrameUniforms {
 struct MaterialUniforms {
     base_color: [f32; 4],
     flags: [u32; 4],
+    eye: [f32; 4],
 }
 
 /// Everything that changes from one frame to the next.
@@ -46,6 +47,8 @@ pub struct FrameInput<'a> {
     pub joints: &'a [Mat4],
     pub morphs: &'a [f32],
     pub time: f32,
+    /// Where the eyes look, -1..1 with y up.
+    pub gaze: glam::Vec2,
 }
 
 struct DrawBatch {
@@ -480,7 +483,8 @@ impl Renderer {
                 let view = m.texture.and_then(|i| textures.get(i));
                 let uniforms = MaterialUniforms {
                     base_color: m.base_color,
-                    flags: [view.is_some() as u32, 0, 0, 0],
+                    flags: [view.is_some() as u32, m.eye.is_some() as u32, 0, 0],
+                    eye: m.eye.unwrap_or_default(),
                 };
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("material"),
@@ -781,7 +785,7 @@ impl Renderer {
                 s.outline * self.height,
             ],
             glow: [s.glow[0], s.glow[1], s.glow[2], s.fur * self.height],
-            params: [input.time, s.bands as f32, 0.0, 0.0],
+            params: [input.time, s.bands as f32, input.gaze.x, input.gaze.y],
             counts: [self.vertex_count, self.morph_count, shells, kind],
         };
         self.queue

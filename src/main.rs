@@ -4,6 +4,7 @@ mod behavior;
 mod camera;
 mod check;
 mod cursor;
+mod eyes;
 mod hit;
 mod model;
 mod pet;
@@ -76,7 +77,7 @@ impl App {
     fn new(opts: Options) -> Result<Self, String> {
         let pet = Pet::open(&opts.pet)?;
         let style = pet.style(opts.style.as_deref())?;
-        let model = model::load(&pet.model_path())?;
+        let model = pet.load_model()?;
         let behavior = Behavior::new(&model, &pet.manifest)?;
         let splats = splat::for_style(&pet.dir, &model, &style)?;
         let facing = Quat::from_rotation_y(pet.manifest.facing.to_radians());
@@ -173,6 +174,7 @@ impl App {
             joints: &joints,
             morphs: &self.pose.morphs,
             time: (now - self.started).as_secs_f32(),
+            gaze: self.behavior.gaze(),
         };
         if let Some(renderer) = &mut self.renderer {
             renderer.render(&input);
@@ -422,7 +424,7 @@ fn render_sheet(dir: PathBuf, flags: Vec<(String, String)>) {
         }
     }
     let pet = Pet::open(&dir).unwrap_or_else(|e| fail(e));
-    let model = model::load(&pet.model_path()).unwrap_or_else(|e| fail(e));
+    let model = pet.load_model().unwrap_or_else(|e| fail(e));
     let report = sheet::render(&pet, &model, &opts, &out).unwrap_or_else(|e| fail(e));
     println!(
         "{}: {}x{}, {} cells, median {:.2?} per frame",
@@ -492,7 +494,7 @@ fn bake_splats(dir: PathBuf, flags: Vec<(String, String)>) {
         }
     }
     let pet = Pet::open(&dir).unwrap_or_else(|e| fail(e));
-    let model = model::load(&pet.model_path()).unwrap_or_else(|e| fail(e));
+    let model = pet.load_model().unwrap_or_else(|e| fail(e));
     let splats = splat::bake(&model, count);
     if splats.is_empty() {
         fail("the model has no surface to cover".into());
@@ -535,7 +537,7 @@ fn align_splats(dir: PathBuf, flags: Vec<(String, String)>) {
         .splats
         .clone()
         .unwrap_or_else(|| fail(format!("style \"{name}\" has no splats")));
-    let model = model::load(&pet.model_path()).unwrap_or_else(|e| fail(e));
+    let model = pet.load_model().unwrap_or_else(|e| fail(e));
     let splats = splat::load_ply(&dir.join(file)).unwrap_or_else(|e| fail(e));
     let (a, yaw, err) = splat::fit_alignment(&model, &splats);
     let toml = dir.join("pet.toml");

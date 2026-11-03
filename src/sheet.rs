@@ -98,13 +98,14 @@ pub fn render(pet: &Pet, model: &Model, opts: &SheetOptions, out: &Path) -> Resu
             camera,
             height,
         ))?;
-        let mut draw = |pose: &Pose, yaw: f32, time: f32| -> Result<Vec<u8>, String> {
+        let mut draw = |pose: &Pose, yaw: f32, time: f32, gaze: Vec2| -> Result<Vec<u8>, String> {
             let joints = pose::joint_matrices(model, pose);
             let input = FrameInput {
                 model: scene::placement(yaw, facing, 0.0),
                 joints: &joints,
                 morphs: &pose.morphs,
                 time,
+                gaze,
             };
             let (rgba, t) = renderer.capture(&input)?;
             frame_times.push(t);
@@ -124,7 +125,7 @@ pub fn render(pet: &Pet, model: &Model, opts: &SheetOptions, out: &Path) -> Resu
             let yaw = std::f32::consts::TAU * k as f32 / cols as f32;
             cells.push(Cell {
                 label: format!("{:.0}°", yaw.to_degrees()),
-                rgba: draw(&rest_or_idle(), yaw, 0.0)?,
+                rgba: draw(&rest_or_idle(), yaw, 0.0, Vec2::ZERO)?,
             });
         }
         rows.push((format!("{name}: turntable"), cells));
@@ -139,7 +140,7 @@ pub fn render(pet: &Pet, model: &Model, opts: &SheetOptions, out: &Path) -> Resu
                 pose::sample(model, clip, t, &mut p);
                 cells.push(Cell {
                     label: format!("{t:.2}s"),
-                    rgba: draw(&p, 0.0, t)?,
+                    rgba: draw(&p, 0.0, t, Vec2::ZERO)?,
                 });
             }
             rows.push((
@@ -163,16 +164,21 @@ pub fn render(pet: &Pet, model: &Model, opts: &SheetOptions, out: &Path) -> Resu
                 behavior::look(model, &mut p, head, limit, gaze, facing);
                 cells.push(Cell {
                     label: label.into(),
-                    rgba: draw(&p, 0.0, 0.0)?,
+                    rgba: draw(&p, 0.0, 0.0, gaze)?,
                 });
             }
         }
-        if let Some(m) = rig.blink.as_deref().and_then(|n| model.morph(n)) {
+        let blink = rig
+            .blink
+            .as_deref()
+            .and_then(|n| model.morph(n))
+            .or_else(|| model.morph(crate::eyes::BLINK_MORPH));
+        if let Some(m) = blink {
             let mut p = rest_or_idle();
             p.morphs[m] = behavior::blink_weight(0.064).unwrap_or(1.0);
             cells.push(Cell {
                 label: "blink".into(),
-                rgba: draw(&p, 0.0, 0.0)?,
+                rgba: draw(&p, 0.0, 0.0, Vec2::ZERO)?,
             });
         }
         if !cells.is_empty() {

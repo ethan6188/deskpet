@@ -97,6 +97,15 @@ mesh. The glTF still provides skeleton, clips and click-through.
   from the mesh: above 1% the alignment is wrong or background is left.
 - Keep under 300k splats; `check` prints the CPU sort time per frame.
 
+## 4c. Eyes
+
+Eyes carry most of a pet's expression. If the model's eyes are painted flat or missing, add `[eyes]`:
+`center` (the +x eye, rest-pose model space; `check` prints the head joint's position as a start),
+`forward` (where that eye looks), `radius`, `height` (below 1 for almond), `iris` color, `iris_size`,
+`pupil`, `pupil_aspect` (small = slit, for foxes and cats). deskpet mirrors them, binds them to
+`rig.head`, follows the cursor with the iris, and blinks them without a morph target. Judge them on a
+`--cell 1100` sheet: the iris should fill most of the eye, the pupil should read from across the room.
+
 ## 5. Behavior
 
 In `[animations]`: `idle` loops; `fidget` clips play now and then while idle; `react` plays on a click.
