@@ -7,7 +7,8 @@ use crate::model::Model;
 use crate::pet::Manifest;
 use crate::pose::{self, Pose};
 
-const CROSSFADE: f32 = 0.35;
+pub const CROSSFADE: f32 = 0.35;
+const BLINK_SECONDS: f32 = 0.16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -61,7 +62,11 @@ impl Behavior {
     pub fn new(model: &Model, manifest: &Manifest) -> Result<Self, String> {
         let clip = |name: &String| {
             model.clip(name).ok_or_else(|| {
-                format!("pet.toml names animation \"{name}\", which the model lacks")
+                let names: Vec<&str> = model.clips.iter().map(|c| c.name.as_str()).collect();
+                format!(
+                    "pet.toml names animation \"{name}\", which the model lacks; clips: {}",
+                    names.join(", ")
+                )
             })
         };
         let a = &manifest.animations;
@@ -71,9 +76,18 @@ impl Behavior {
             .head
             .as_ref()
             .map(|n| {
-                model
-                    .node(n)
-                    .ok_or_else(|| format!("rig.head \"{n}\" is not a node"))
+                model.node(n).ok_or_else(|| {
+                    let names: Vec<&str> = model
+                        .nodes
+                        .iter()
+                        .map(|n| n.name.as_str())
+                        .filter(|n| !n.is_empty())
+                        .collect();
+                    format!(
+                        "rig.head \"{n}\" is not a node; nodes: {}",
+                        names.join(", ")
+                    )
+                })
             })
             .transpose()?;
         let blink = manifest
@@ -81,9 +95,12 @@ impl Behavior {
             .blink
             .as_ref()
             .map(|n| {
-                model
-                    .morph(n)
-                    .ok_or_else(|| format!("rig.blink \"{n}\" is not a morph target"))
+                model.morph(n).ok_or_else(|| {
+                    format!(
+                        "rig.blink \"{n}\" is not a morph target; morphs: {}",
+                        model.morph_names.join(", ")
+                    )
+                })
             })
             .transpose()?;
         let idle = opt(&a.idle)?;
@@ -181,7 +198,7 @@ impl Behavior {
         if self.blink.is_some() {
             if self.blink_t >= 0.0 {
                 self.blink_t += dt;
-                if self.blink_t > 0.16 {
+                if self.blink_t > BLINK_SECONDS {
                     self.blink_t = -1.0;
                 }
             } else {
@@ -229,30 +246,37 @@ impl Behavior {
         };
 
         if let Some(head) = self.head {
-            // Turn the head from "facing the camera" towards the cursor, in model space.
-            let limit = self.look_limit;
-            let yaw = (self.gaze.x * limit).clamp(-limit, limit);
-            let pitch = (self.gaze.y * limit * 0.6).clamp(-limit, limit);
-            let to_model = facing.inverse();
-            let forward = to_model * Vec3::Z;
-            let wanted = to_model * Vec3::new(yaw.tan(), pitch.tan(), 1.0).normalize();
-            pose::rotate_world(
-                model,
-                &mut pose,
-                head,
-                Quat::from_rotation_arc(forward, wanted),
-            );
+            look(model, &mut pose, head, self.look_limit, self.gaze, facing);
         }
-        if let (Some(m), true) = (self.blink, self.blink_t >= 0.0) {
-            // Close fast, open a little slower.
-            let t = self.blink_t / 0.16;
-            let w = if t < 0.4 {
-                t / 0.4
-            } else {
-                1.0 - (t - 0.4) / 0.6
-            };
-            pose.morphs[m] = pose.morphs[m].max(w.clamp(0.0, 1.0));
+        if let (Some(m), Some(w)) = (self.blink, blink_weight(self.blink_t)) {
+            pose.morphs[m] = pose.morphs[m].max(w);
         }
         pose
     }
+}
+
+/// Turns `head` from facing the camera towards `gaze` (-1..1, y up), at most
+/// `limit` radians. `facing` is the model's rotation into camera space.
+pub fn look(model: &Model, pose: &mut Pose, head: usize, limit: f32, gaze: Vec2, facing: Quat) {
+    let yaw = (gaze.x * limit).clamp(-limit, limit);
+    let pitch = (gaze.y * limit * 0.6).clamp(-limit, limit);
+    let to_model = facing.inverse();
+    let forward = to_model * Vec3::Z;
+    let wanted = to_model * Vec3::new(yaw.tan(), pitch.tan(), 1.0).normalize();
+    pose::rotate_world(model, pose, head, Quat::from_rotation_arc(forward, wanted));
+}
+
+/// Weight of the blink morph `t` seconds into a blink, or None outside one.
+pub fn blink_weight(t: f32) -> Option<f32> {
+    let t = t / BLINK_SECONDS;
+    if !(0.0..=1.0).contains(&t) {
+        return None;
+    }
+    // Close fast, open a little slower.
+    let w = if t < 0.4 {
+        t / 0.4
+    } else {
+        1.0 - (t - 0.4) / 0.6
+    };
+    Some(w.clamp(0.0, 1.0))
 }

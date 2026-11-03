@@ -2,19 +2,23 @@
 
 mod behavior;
 mod camera;
+mod check;
 mod cursor;
 mod hit;
 mod model;
 mod pet;
 mod pose;
 mod renderer;
+mod scaffold;
+mod scene;
 mod schedule;
+mod sheet;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glam::{Mat4, Quat, Vec2, Vec3};
+use glam::{Mat4, Quat, Vec2};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -95,41 +99,8 @@ impl App {
         })
     }
 
-    /// Bounds over the rest pose and every clip, at any spin, so the pet never
-    /// walks out of its window.
-    fn framing(&self) -> Camera {
-        let mut lo = Vec3::splat(f32::MAX);
-        let mut hi = Vec3::splat(f32::MIN);
-        let mut add = |pose: &Pose| {
-            for p in pose::skinned_positions(&self.model, pose) {
-                lo = lo.min(p);
-                hi = hi.max(p);
-            }
-        };
-        add(&Pose::rest(&self.model));
-        for clip in &self.model.clips {
-            for k in 0..=12 {
-                let mut pose = Pose::rest(&self.model);
-                pose::sample(
-                    &self.model,
-                    clip,
-                    clip.duration * k as f32 / 12.0,
-                    &mut pose,
-                );
-                add(&pose);
-            }
-        }
-        // Spinning about Y sweeps a circle; frame the circle, centered on the axis.
-        let r = Vec2::new(lo.x.abs().max(hi.x.abs()), lo.z.abs().max(hi.z.abs())).length();
-        let fur = self.style.fur.max(self.style.outline) * (hi.y - lo.y);
-        Camera::fit(Vec3::new(-r, lo.y, -r) - fur, Vec3::new(r, hi.y, r) + fur)
-    }
-
     fn placement(&self) -> Mat4 {
-        // Breathing: a slow vertical squash-and-stretch about the feet that keeps volume.
-        let b = 1.0 + 0.015 * self.behavior.breath_phase.sin();
-        Mat4::from_quat(Quat::from_rotation_y(self.yaw) * self.facing)
-            * Mat4::from_scale(Vec3::new(1.0 / b.sqrt(), b, 1.0 / b.sqrt()))
+        scene::placement(self.yaw, self.facing, self.behavior.breath_phase)
     }
 
     /// The cursor relative to the window, in -1..1 with y up, if known.
@@ -207,7 +178,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let camera = self.framing();
+        let camera = scene::framing(&self.model, &self.style, self.facing);
         let height = self.pet.manifest.height as f64;
         let attrs = WindowAttributes::default()
             .with_title(&self.pet.manifest.name)
@@ -218,15 +189,8 @@ impl ApplicationHandler for App {
             .with_has_shadow(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let (lo, hi) = self
-            .model
-            .vertices
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
-                (lo.min(v.position[1]), hi.max(v.position[1]))
-            });
-        self.height = hi - lo;
-        let render_camera = self.framing();
+        self.height = scene::model_height(&self.model);
+        let render_camera = scene::framing(&self.model, &self.style, self.facing);
         self.renderer = Some(pollster::block_on(Renderer::new(
             window.clone(),
             &self.model,
@@ -330,36 +294,164 @@ impl ApplicationHandler for App {
     }
 }
 
+const USAGE: &str = "\
+usage:
+  deskpet [run] [--pet DIR] [--style NAME] [--power eco|balanced|smooth]
+      Run the pet on the desktop.
+  deskpet render DIR [--out FILE] [--style NAME]... [--clip NAME]... [--columns N] [--cell PX]
+      Render a contact sheet PNG: turntable, every clip, head look and blink.
+  deskpet check DIR [--json] [--scale N]
+      Check a pet package. Exit status 1 on errors, 0 otherwise.
+  deskpet new DIR --model FILE.glb [--name NAME]
+      Make a pet package from a glTF binary, with guessed settings to confirm.";
+
 fn usage() -> ! {
-    eprintln!("usage: deskpet [--pet DIR] [--style NAME] [--power eco|balanced|smooth]");
+    eprintln!("{USAGE}");
     std::process::exit(2);
 }
 
-fn parse_args() -> Options {
+fn fail(e: String) -> ! {
+    eprintln!("deskpet: {e}");
+    std::process::exit(1);
+}
+
+/// Splits `--flag value` pairs; returns positional arguments and flags.
+fn split_args(
+    args: impl Iterator<Item = String>,
+    switches: &[&str],
+) -> (Vec<String>, Vec<(String, String)>) {
+    let mut positional = Vec::new();
+    let mut flags = Vec::new();
+    let mut args = args.peekable();
+    while let Some(a) = args.next() {
+        if a == "-h" || a == "--help" {
+            println!("{USAGE}");
+            std::process::exit(0);
+        } else if switches.contains(&a.as_str()) {
+            flags.push((a, String::new()));
+        } else if a.starts_with("--") {
+            let v = args.next().unwrap_or_else(|| usage());
+            flags.push((a, v));
+        } else {
+            positional.push(a);
+        }
+    }
+    (positional, flags)
+}
+
+fn run_app(flags: Vec<(String, String)>) {
     let mut opts = Options {
         pet: PathBuf::from("pets/fox"),
         style: None,
         power: PowerProfile::Balanced,
     };
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        let mut value = || args.next().unwrap_or_else(|| usage());
-        match arg.as_str() {
-            "--pet" => opts.pet = PathBuf::from(value()),
-            "--style" => opts.style = Some(value()),
-            "--power" => opts.power = PowerProfile::parse(&value()).unwrap_or_else(|| usage()),
+    for (k, v) in flags {
+        match k.as_str() {
+            "--pet" => opts.pet = PathBuf::from(v),
+            "--style" => opts.style = Some(v),
+            "--power" => opts.power = PowerProfile::parse(&v).unwrap_or_else(|| usage()),
             _ => usage(),
         }
     }
-    opts
+    let mut app = App::new(opts).unwrap_or_else(|e| fail(e));
+    let event_loop = EventLoop::new().expect("event loop");
+    event_loop.run_app(&mut app).expect("run app");
+}
+
+fn render_sheet(dir: PathBuf, flags: Vec<(String, String)>) {
+    let mut opts = sheet::SheetOptions {
+        styles: Vec::new(),
+        clips: Vec::new(),
+        columns: 6,
+        cell_height: 360,
+    };
+    let mut out = dir.join("contact.png");
+    for (k, v) in flags {
+        match k.as_str() {
+            "--out" => out = PathBuf::from(v),
+            "--style" => opts.styles.push(v),
+            "--clip" => opts.clips.push(v),
+            "--columns" => opts.columns = v.parse().unwrap_or_else(|_| usage()),
+            "--cell" => opts.cell_height = v.parse().unwrap_or_else(|_| usage()),
+            _ => usage(),
+        }
+    }
+    let pet = Pet::open(&dir).unwrap_or_else(|e| fail(e));
+    let model = model::load(&pet.model_path()).unwrap_or_else(|e| fail(e));
+    let report = sheet::render(&pet, &model, &opts, &out).unwrap_or_else(|e| fail(e));
+    println!(
+        "{}: {}x{}, {} cells, median {:.2?} per frame",
+        out.display(),
+        report.width,
+        report.height,
+        report.cells,
+        report.median_frame
+    );
+}
+
+fn check_pet(dir: PathBuf, flags: Vec<(String, String)>) {
+    let mut json = false;
+    // Retina windows are drawn at twice their size in points.
+    let mut scale = 2.0;
+    for (k, v) in flags {
+        match k.as_str() {
+            "--json" => json = true,
+            "--scale" => scale = v.parse().unwrap_or_else(|_| usage()),
+            _ => usage(),
+        }
+    }
+    let findings = check::run(&dir, scale);
+    if json {
+        println!("{}", findings.to_json());
+    } else {
+        for f in &findings.0 {
+            let tag = match f.level {
+                check::Level::Ok => "ok   ",
+                check::Level::Warn => "warn ",
+                check::Level::Error => "ERROR",
+            };
+            println!("{tag} {:<12} {}", f.check, f.message);
+        }
+    }
+    if findings.worst() == check::Level::Error {
+        std::process::exit(1);
+    }
+}
+
+fn new_pet(dir: PathBuf, flags: Vec<(String, String)>) {
+    let mut source = None;
+    let mut name = None;
+    for (k, v) in flags {
+        match k.as_str() {
+            "--model" => source = Some(PathBuf::from(v)),
+            "--name" => name = Some(v),
+            _ => usage(),
+        }
+    }
+    let source = source.unwrap_or_else(|| usage());
+    scaffold::create(&dir, &source, name.as_deref()).unwrap_or_else(|e| fail(e));
+    println!(
+        "{}: created. Next: deskpet check {0} && deskpet render {0}",
+        dir.display()
+    );
 }
 
 fn main() {
-    let app = App::new(parse_args());
-    let mut app = app.unwrap_or_else(|e| {
-        eprintln!("deskpet: {e}");
-        std::process::exit(1);
-    });
-    let event_loop = EventLoop::new().expect("event loop");
-    event_loop.run_app(&mut app).expect("run app");
+    let mut args = std::env::args().skip(1).peekable();
+    let command = match args.peek().map(String::as_str) {
+        Some("run" | "render" | "check" | "new") => args.next(),
+        _ => None,
+    };
+    let (positional, flags) = split_args(args, &["--json"]);
+    let one_dir = |p: Vec<String>| match p.as_slice() {
+        [d] => PathBuf::from(d),
+        _ => usage(),
+    };
+    match command.as_deref() {
+        None | Some("run") if positional.is_empty() => run_app(flags),
+        Some("render") => render_sheet(one_dir(positional), flags),
+        Some("check") => check_pet(one_dir(positional), flags),
+        Some("new") => new_pet(one_dir(positional), flags),
+        _ => usage(),
+    }
 }

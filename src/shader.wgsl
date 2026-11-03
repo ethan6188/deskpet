@@ -4,7 +4,6 @@
 
 const KIND_REAL: u32 = 0u;
 const KIND_ANIME: u32 = 1u;
-const KIND_CYBER: u32 = 2u;
 
 struct Frame {
     view_proj: mat4x4<f32>,
@@ -17,7 +16,7 @@ struct Frame {
     tint: vec4<f32>,
     // rgb: outline color, w: outline width in model units.
     outline: vec4<f32>,
-    // rgb: glow / rim color, w: fur length in model units.
+    // rgb: rim light color, w: fur length in model units.
     glow: vec4<f32>,
     // x: seconds, y: cel bands.
     params: vec4<f32>,
@@ -164,21 +163,6 @@ fn shade_anime(base: vec3<f32>, n: vec3<f32>, l: vec3<f32>, v: vec3<f32>) -> vec
     return base * light * shadow_tint + vec3<f32>(highlight) + rim * f.glow.rgb;
 }
 
-fn shade_cyber(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, world: vec3<f32>, frag_y: f32) -> vec4<f32> {
-    let fresnel = pow(1.0 - max(dot(n, v), 0.0), 2.5);
-    let luma = dot(base, vec3<f32>(0.3, 0.59, 0.11));
-    let t = f.params.x;
-    // Scan lines in screen space, so they stay crisp at any size.
-    let scan = 0.8 + 0.2 * sin(frag_y * 1.6);
-    // A brighter band sweeping up the body.
-    let sweep = smoothstep(0.08, 0.0, abs(fract(world.y * 0.01 - t * 0.25) - 0.5));
-    let flicker = 0.94 + 0.06 * sin(t * 37.0) * sin(t * 13.0);
-    let c = f.glow.rgb * (0.18 + luma * 0.55 + fresnel * 1.4 + sweep * 0.6) * scan * flicker;
-    let alpha = clamp(0.55 + fresnel * 0.45 + sweep * 0.3, 0.0, 1.0);
-    // Premultiplied.
-    return vec4<f32>(c * alpha, alpha);
-}
-
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
@@ -188,9 +172,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     switch f.counts.w {
         case KIND_ANIME: {
             return vec4<f32>(shade_anime(base, n, l, v), 1.0);
-        }
-        case KIND_CYBER: {
-            return shade_cyber(base, n, v, in.world, in.clip.y);
         }
         default: {
             // The skin under fur is darker: light rarely reaches it.
@@ -202,9 +183,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_outline(in: VsOut) -> @location(0) vec4<f32> {
-    if (f.counts.w == KIND_CYBER) {
-        return vec4<f32>(f.glow.rgb * 0.9, 0.9);
-    }
     return vec4<f32>(f.outline.rgb, 1.0);
 }
 

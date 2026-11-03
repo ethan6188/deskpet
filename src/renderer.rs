@@ -1,5 +1,6 @@
 //! wgpu renderer: skinned, morphing, multi-style pet drawn with 4x MSAA into a
-//! transparent, Retina-resolution surface.
+//! transparent, Retina-resolution window surface, or into an offscreen texture
+//! that the agent tools read back.
 
 use std::sync::Arc;
 
@@ -52,11 +53,26 @@ struct DrawBatch {
     material: usize,
 }
 
+enum Target {
+    Window {
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+    },
+    Offscreen {
+        texture: wgpu::Texture,
+    },
+}
+
+/// Offscreen color format; sRGB so the pixels match what a window shows.
+const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    target: Target,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+    width: u32,
+    height_px: u32,
+    format: wgpu::TextureFormat,
     main: wgpu::RenderPipeline,
     outline: Option<wgpu::RenderPipeline>,
     fur: Option<wgpu::RenderPipeline>,
@@ -170,7 +186,8 @@ fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl Renderer {
-    /// `camera` frames the pet; `height` is its height in model units.
+    /// A renderer drawing into `window`. `camera` frames the pet; `height` is
+    /// its height in model units.
     pub async fn new(
         window: Arc<Window>,
         model: &Model,
@@ -179,19 +196,9 @@ impl Renderer {
         height: f32,
     ) -> Self {
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = Self::instance();
         let surface = instance.create_surface(window).expect("create surface");
-        // A desktop pet runs all day: prefer the integrated, low-power GPU.
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            })
+        let adapter = Self::adapter(&instance, Some(&surface))
             .await
             .expect("no GPU adapter");
         let (device, queue) = adapter
@@ -221,7 +228,102 @@ impl Renderer {
         // Fifo is vsync: never renders faster than the display needs.
         config.present_mode = wgpu::PresentMode::Fifo;
         surface.configure(&device, &config);
+        let (w, h) = (config.width, config.height);
+        Self::build(
+            Target::Window { surface, config },
+            device,
+            queue,
+            format,
+            (w, h),
+            model,
+            style,
+            camera,
+            height,
+        )
+    }
 
+    /// A renderer drawing `width` x `height` pixels offscreen, for `capture`.
+    pub async fn offscreen(
+        width: u32,
+        height_px: u32,
+        model: &Model,
+        style: Style,
+        camera: Camera,
+        height: f32,
+    ) -> Result<Self, String> {
+        let instance = Self::instance();
+        let adapter = Self::adapter(&instance, None)
+            .await
+            .map_err(|e| format!("no GPU adapter: {e}"))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .map_err(|e| format!("request device: {e}"))?;
+        let texture = Self::offscreen_texture(&device, width, height_px);
+        Ok(Self::build(
+            Target::Offscreen { texture },
+            device,
+            queue,
+            OFFSCREEN_FORMAT,
+            (width, height_px),
+            model,
+            style,
+            camera,
+            height,
+        ))
+    }
+
+    fn instance() -> wgpu::Instance {
+        wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        })
+    }
+
+    async fn adapter(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<wgpu::Adapter, wgpu::RequestAdapterError> {
+        // A desktop pet runs all day: prefer the integrated, low-power GPU.
+        instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                force_fallback_adapter: false,
+                compatible_surface: surface,
+                ..Default::default()
+            })
+            .await
+    }
+
+    fn offscreen_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OFFSCREEN_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        target: Target,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+        (width, height_px): (u32, u32),
+        model: &Model,
+        style: Style,
+        camera: Camera,
+        height: f32,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pet shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -432,12 +534,14 @@ impl Renderer {
         let fur = (style.kind == StyleKind::Real && style.fur > 0.0)
             .then(|| pipeline("fur", "vs_fur", "fs_fur", wgpu::Face::Back));
 
-        let (msaa_view, depth_view) = Self::attachments(&device, &config);
+        let (msaa_view, depth_view) = Self::attachments(&device, format, width, height_px);
         Self {
-            surface,
+            target,
             device,
             queue,
-            config,
+            width,
+            height_px,
+            format,
             main,
             outline,
             fur,
@@ -469,11 +573,13 @@ impl Renderer {
 
     fn attachments(
         device: &wgpu::Device,
-        config: &wgpu::SurfaceConfiguration,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
     ) -> (wgpu::TextureView, wgpu::TextureView) {
         let size = wgpu::Extent3d {
-            width: config.width,
-            height: config.height,
+            width,
+            height,
             depth_or_array_layers: 1,
         };
         let make = |label, format| {
@@ -490,39 +596,133 @@ impl Renderer {
                 })
                 .create_view(&Default::default())
         };
-        (
-            make("msaa color", config.format),
-            make("depth", DEPTH_FORMAT),
-        )
+        (make("msaa color", format), make("depth", DEPTH_FORMAT))
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
-        (self.msaa_view, self.depth_view) = Self::attachments(&self.device, &self.config);
+        self.width = width;
+        self.height_px = height;
+        match &mut self.target {
+            Target::Window { surface, config } => {
+                config.width = width;
+                config.height = height;
+                surface.configure(&self.device, config);
+            }
+            Target::Offscreen { texture } => {
+                *texture = Self::offscreen_texture(&self.device, width, height);
+            }
+        }
+        (self.msaa_view, self.depth_view) =
+            Self::attachments(&self.device, self.format, width, height);
     }
 
+    /// Draws a frame and shows it in the window. Offscreen, it only draws.
     pub fn render(&mut self, input: &FrameInput) {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return;
-            }
-            _ => return,
+        let frame = match &self.target {
+            Target::Window { surface, config } => match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => Some(f),
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    surface.configure(&self.device, config);
+                    return;
+                }
+                _ => return,
+            },
+            Target::Offscreen { .. } => None,
         };
-        let view = frame.texture.create_view(&Default::default());
+        let view = match (&frame, &self.target) {
+            (Some(f), _) => f.texture.create_view(&Default::default()),
+            (None, Target::Offscreen { texture }) => texture.create_view(&Default::default()),
+            (None, Target::Window { .. }) => return,
+        };
+        self.encode(input, &view);
+        if let Some(frame) = frame {
+            self.queue.present(frame);
+        }
+    }
 
+    /// Draws a frame offscreen and returns it as tightly packed RGBA8 rows
+    /// (sRGB, premultiplied alpha), plus how long the GPU took.
+    pub fn capture(
+        &mut self,
+        input: &FrameInput,
+    ) -> Result<(Vec<u8>, std::time::Duration), String> {
+        let Target::Offscreen { texture } = &self.target else {
+            return Err("capture needs an offscreen renderer".into());
+        };
+        let texture = texture.clone();
+        let view = texture.create_view(&Default::default());
+        let started = std::time::Instant::now();
+        self.encode(input, &view);
+        let (w, h) = (self.width, self.height_px);
+        // Rows of a texture-to-buffer copy must be 256-byte aligned.
+        let row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|e| format!("GPU poll: {e}"))?;
+        let gpu_time = started.elapsed();
+        rx.recv()
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("map readback: {e}"))?;
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|e| format!("read mapped buffer: {e:?}"))?;
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let start = (y * row) as usize;
+            out.extend_from_slice(&mapped[start..start + (w * 4) as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        Ok((out, gpu_time))
+    }
+
+    fn encode(&mut self, input: &FrameInput, view: &wgpu::TextureView) {
         let s = &self.style;
         let kind = match s.kind {
             StyleKind::Real => 0,
             StyleKind::Anime => 1,
-            StyleKind::Cyber => 2,
         };
         let shells = if self.fur.is_some() { FUR_SHELLS } else { 0 };
         let uniforms = FrameUniforms {
@@ -562,7 +762,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_view,
                     depth_slice: None,
-                    resolve_target: Some(&view),
+                    resolve_target: Some(view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Discard,
@@ -602,6 +802,5 @@ impl Renderer {
             }
         }
         self.queue.submit([encoder.finish()]);
-        self.queue.present(frame);
     }
 }

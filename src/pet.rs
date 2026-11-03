@@ -12,8 +12,6 @@ pub enum StyleKind {
     Real,
     /// Banded cel shading with ink outlines.
     Anime,
-    /// Emissive holographic look: fresnel glow, scan lines, flicker.
-    Cyber,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -31,7 +29,7 @@ pub struct Style {
     /// Fur length as a fraction of the pet's height; 0 turns fur off (real).
     #[serde(default)]
     pub fur: f32,
-    /// Glow color (cyber) or rim light color (real, anime).
+    /// Rim light color.
     #[serde(default = "default_glow")]
     pub glow: [f32; 3],
     /// Number of cel bands (anime).

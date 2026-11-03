@@ -106,6 +106,8 @@ pub struct Model {
     /// For each node with a mesh, the global morph index of each of its targets.
     pub node_morphs: Vec<Vec<Option<usize>>>,
     pub clips: Vec<Clip>,
+    /// Morph targets beyond `MAX_MORPHS` that were left out.
+    pub dropped_morphs: usize,
 }
 
 impl Model {
@@ -245,6 +247,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
         morph_deltas: Vec::new(),
         node_morphs: vec![Vec::new(); gnodes.len()],
         clips: Vec::new(),
+        dropped_morphs: 0,
     };
     // Per-vertex morph deltas, keyed by global morph index, before transposing.
     let mut deltas: Vec<Vec<(usize, [f32; 4])>> = Vec::new();
@@ -290,6 +293,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
                 })
             })
             .collect();
+        model.dropped_morphs += globals.iter().filter(|g| g.is_none()).count();
         model.node_morphs[ni] = globals.clone();
 
         for prim in mesh.primitives() {
