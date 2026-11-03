@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::mesh::{Mesh, Vertex};
+use crate::camera::Camera;
+use crate::mesh::{Ellipsoid, Mesh, Vertex};
 
 const MSAA_SAMPLES: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -19,6 +20,7 @@ struct Uniforms {
     model: [[f32; 4]; 4],
     light_dir: [f32; 4],
     base_color: [f32; 4],
+    eye: [f32; 4],
 }
 
 pub struct Renderer {
@@ -34,10 +36,12 @@ pub struct Renderer {
     bind_group: wgpu::BindGroup,
     msaa_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
+    pub camera: Camera,
+    pub hit_shapes: Vec<Ellipsoid>,
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub async fn new(window: Arc<Window>, mesh: Mesh) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL,
@@ -87,7 +91,7 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        let mesh = Mesh::placeholder_pet();
+        let (lo, hi) = mesh.bounds();
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
@@ -188,6 +192,8 @@ impl Renderer {
             bind_group,
             msaa_view,
             depth_view,
+            camera: Camera::fit(lo, hi),
+            hit_shapes: mesh.hit_shapes,
         }
     }
 }
@@ -232,8 +238,8 @@ impl Renderer {
         (self.msaa_view, self.depth_view) = Self::attachments(&self.device, &self.config);
     }
 
-    /// Renders one frame. `t` is seconds since start and drives the idle animation.
-    pub fn render(&mut self, t: f32, yaw: f32) {
+    /// Renders one frame with the pet placed by `model`.
+    pub fn render(&mut self, model: Mat4) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -245,20 +251,12 @@ impl Renderer {
         };
         let view = frame.texture.create_view(&Default::default());
 
-        let aspect = self.config.width as f32 / self.config.height as f32;
-        let proj =
-            glam::camera::rh::proj::directx::perspective(40f32.to_radians(), aspect, 0.1, 10.0);
-        let cam =
-            glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.1, 3.0), Vec3::ZERO, Vec3::Y);
-        // Breathing: a slow vertical squash-and-stretch.
-        let breath = 1.0 + 0.02 * (t * 2.2).sin();
-        let model = Mat4::from_rotation_y(yaw)
-            * Mat4::from_scale(Vec3::new(1.0 / breath.sqrt(), breath, 1.0 / breath.sqrt()));
         let uniforms = Uniforms {
-            view_proj: (proj * cam).to_cols_array_2d(),
+            view_proj: self.camera.view_proj().to_cols_array_2d(),
             model: model.to_cols_array_2d(),
             light_dir: [0.4, 0.8, 0.6, 0.0],
             base_color: [0.95, 0.62, 0.32, 1.0],
+            eye: self.camera.eye.extend(1.0).to_array(),
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

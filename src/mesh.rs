@@ -10,9 +10,31 @@ pub struct Vertex {
     pub normal: [f32; 3],
 }
 
+/// An analytic shape used for cursor hit testing; far cheaper than testing triangles.
+#[derive(Clone, Copy)]
+pub struct Ellipsoid {
+    pub radii: Vec3,
+    pub center: Vec3,
+}
+
+impl Ellipsoid {
+    /// Whether a ray (in the ellipsoid's space) hits it.
+    pub fn hit(&self, origin: Vec3, dir: Vec3) -> bool {
+        // Scale space so the ellipsoid becomes a unit sphere, then solve the quadratic.
+        let o = (origin - self.center) / self.radii;
+        let d = dir / self.radii;
+        let a = d.dot(d);
+        let b = o.dot(d);
+        let c = o.dot(o) - 1.0;
+        let disc = b * b - a * c;
+        disc >= 0.0 && (-b + disc.sqrt()) >= 0.0
+    }
+}
+
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub hit_shapes: Vec<Ellipsoid>,
 }
 
 impl Mesh {
@@ -46,11 +68,30 @@ impl Mesh {
                 indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
-        Self { vertices, indices }
+        Self {
+            vertices,
+            indices,
+            hit_shapes: vec![Ellipsoid {
+                radii,
+                center: offset,
+            }],
+        }
+    }
+
+    /// Axis-aligned bounds of all vertices.
+    pub fn bounds(&self) -> (Vec3, Vec3) {
+        self.vertices.iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(lo, hi), v| {
+                let p = Vec3::from_array(v.position);
+                (lo.min(p), hi.max(p))
+            },
+        )
     }
 
     pub fn append(&mut self, other: Mesh) {
         let base = self.vertices.len() as u32;
+        self.hit_shapes.extend(other.hit_shapes);
         self.vertices.extend(other.vertices);
         self.indices
             .extend(other.indices.into_iter().map(|i| i + base));

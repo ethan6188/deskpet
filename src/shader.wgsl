@@ -5,6 +5,8 @@ struct Uniforms {
     light_dir: vec4<f32>,
     // rgb: base color, a: unused
     base_color: vec4<f32>,
+    // xyz: camera position (world space)
+    eye: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -34,7 +36,7 @@ fn vs_main(v: VsIn) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let l = normalize(u.light_dir.xyz);
-    let v = normalize(vec3<f32>(0.0, 0.0, 3.0) - in.world);
+    let v = normalize(u.eye.xyz - in.world);
     let h = normalize(l + v);
 
     // Half-Lambert keeps the shadow side soft, like fur.
