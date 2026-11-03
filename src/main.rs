@@ -66,6 +66,8 @@ struct App {
     cursor: PhysicalPosition<f64>,
     occluded: bool,
     accepts_mouse: bool,
+    /// Whether the main thread currently runs at interactive QoS.
+    interactive_qos: bool,
 }
 
 impl App {
@@ -95,6 +97,7 @@ impl App {
             cursor: PhysicalPosition::new(0.0, 0.0),
             occluded: false,
             accepts_mouse: true,
+            interactive_qos: false,
             pet,
         })
     }
@@ -284,6 +287,11 @@ impl ApplicationHandler for App {
             self.update_click_through();
             self.next_hit_poll = now + HIT_POLL;
         }
+        let interactive = self.scheduler.activity() == Activity::Active;
+        if interactive != self.interactive_qos {
+            set_qos(interactive);
+            self.interactive_qos = interactive;
+        }
         if self.scheduler.frame_due(now, self.behavior.busy())
             && let Some(window) = &self.window
         {
@@ -339,6 +347,21 @@ fn split_args(
     (positional, flags)
 }
 
+/// Asks the kernel to schedule the app as background-ish work: it runs on the
+/// efficiency cores and at lower clocks unless the user is interacting, which
+/// is when frame time matters.
+fn set_qos(interactive: bool) {
+    let class = if interactive {
+        libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE
+    } else {
+        libc::qos_class_t::QOS_CLASS_UTILITY
+    };
+    // SAFETY: only changes the calling thread's scheduling class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(class, 0);
+    }
+}
+
 fn run_app(flags: Vec<(String, String)>) {
     let mut opts = Options {
         pet: PathBuf::from("pets/fox"),
@@ -354,6 +377,7 @@ fn run_app(flags: Vec<(String, String)>) {
         }
     }
     let mut app = App::new(opts).unwrap_or_else(|e| fail(e));
+    set_qos(false);
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.run_app(&mut app).expect("run app");
 }

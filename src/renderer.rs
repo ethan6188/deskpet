@@ -591,7 +591,12 @@ impl Renderer {
                     sample_count: MSAA_SAMPLES,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    // Apple GPUs are tile-based: MSAA samples and depth live in on-chip
+                    // tile memory and are never written to RAM, because we resolve and
+                    // discard them in the same pass. Memoryless storage makes that explicit
+                    // and frees the backing memory entirely.
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TRANSIENT_ATTACHMENT,
                     view_formats: &[],
                 })
                 .create_view(&Default::default())
@@ -743,10 +748,9 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniforms));
-        let joints: Vec<[[f32; 4]; 4]> =
-            input.joints.iter().map(|m| m.to_cols_array_2d()).collect();
+        // glam's Mat4 is 16 column-major f32s, exactly the WGSL layout: upload in place.
         self.queue
-            .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&joints));
+            .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(input.joints));
         if !input.morphs.is_empty() {
             self.queue.write_buffer(
                 &self.morph_weight_buffer,

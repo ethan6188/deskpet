@@ -402,6 +402,7 @@ dependencies = [
  "glam",
  "gltf",
  "image",
+ "libc",
  "pollster",
  "serde",
  "serde_json",
@@ -604,6 +605,9 @@ name = "glam"
 version = "0.34.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54af5066834d6c2d404eb26ea036a15b15d9ff80db510b9a73ff95ab07f30831"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "glow"
