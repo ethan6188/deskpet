@@ -619,3 +619,100 @@ mod tests {
         assert_eq!(order, vec![1, 0, 2]);
     }
 }
+
+/// Finds the scale, heading and offset that best lay rest-pose `splats` over
+/// the model: for each heading, match bounding boxes, then score by the
+/// median distance from a sample of splats to the nearest vertex.
+pub fn fit_alignment(model: &Model, splats: &[Splat]) -> (Align, f32, f32) {
+    let rest = Pose::rest(model);
+    let posed = pose::skinned_positions(model, &rest);
+    let (mlo, mhi) = bounds(posed.iter().copied());
+    let height = (mhi.y - mlo.y).max(1e-6);
+    let grid = Grid::new(&posed, ((mhi - mlo).max_element() / 48.0).max(1e-6));
+    let step = (splats.len() / 4000).max(1);
+    let sample: Vec<Vec3> = splats.iter().step_by(step).map(|s| s.center).collect();
+    // Robust box: ignore stray splats at the edges.
+    let robust = |pts: &[Vec3]| {
+        let axis = |f: fn(&Vec3) -> f32| {
+            let mut v: Vec<f32> = pts.iter().map(f).collect();
+            v.sort_by(f32::total_cmp);
+            (v[v.len() / 100], v[v.len() * 99 / 100])
+        };
+        let (x, y, z) = (axis(|p| p.x), axis(|p| p.y), axis(|p| p.z));
+        (Vec3::new(x.0, y.0, z.0), Vec3::new(x.1, y.1, z.1))
+    };
+    let score = |a: &Align| {
+        let mut d: Vec<f32> = sample
+            .iter()
+            .map(|c| {
+                grid.nearest(&posed, a.rotation * (*c * a.scale) + a.offset, 2)
+                    .1
+            })
+            .collect();
+        let k = d.len() / 2;
+        *d.select_nth_unstable_by(k, f32::total_cmp).1
+    };
+    let mut best = (
+        Align {
+            scale: 1.0,
+            rotation: Quat::IDENTITY,
+            offset: Vec3::ZERO,
+        },
+        f32::MAX,
+    );
+    for k in 0..36 {
+        let rotation = Quat::from_rotation_y((k as f32 * 10.0).to_radians());
+        let turned: Vec<Vec3> = sample.iter().map(|c| rotation * *c).collect();
+        let (lo, hi) = robust(&turned);
+        let scale = height / (hi.y - lo.y).max(1e-6);
+        // Feet on the model's floor, centered on its box in x and z.
+        let center = (lo + hi) * 0.5 * scale;
+        let mcenter = (mlo + mhi) * 0.5;
+        let offset = Vec3::new(
+            mcenter.x - center.x,
+            mlo.y - lo.y * scale,
+            mcenter.z - center.z,
+        );
+        let a = Align {
+            scale,
+            rotation,
+            offset,
+        };
+        let s = score(&a);
+        if s < best.1 {
+            best = (a, s);
+        }
+    }
+    // Refine the offset by coordinate descent.
+    let mut step_len = height * 0.05;
+    while step_len > height * 0.002 {
+        let mut improved = false;
+        for dir in [
+            Vec3::X,
+            Vec3::NEG_X,
+            Vec3::Y,
+            Vec3::NEG_Y,
+            Vec3::Z,
+            Vec3::NEG_Z,
+        ] {
+            let mut a = best.0;
+            a.offset += dir * step_len;
+            let s = score(&a);
+            if s < best.1 {
+                best = (a, s);
+                improved = true;
+            }
+        }
+        if !improved {
+            step_len *= 0.5;
+        }
+    }
+    let yaw = best
+        .0
+        .rotation
+        .to_euler(glam::EulerRot::YXZ)
+        .0
+        .to_degrees()
+        .rem_euclid(360.0);
+    (best.0, yaw, best.1 / height)
+}

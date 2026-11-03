@@ -71,7 +71,10 @@ deskpet bake-splats pets/cat --count 60000       # 用模型贴图铺一层高�
 - 加载时按 `splat_scale`、`splat_rotate`、`splat_offset` 把点云对齐到模型的静止姿势，再把每个点绑到最近的顶点，继承它的骨骼和权重，GPU 上和顶点一样蒙皮。
 - 每帧在 CPU 上按深度做基数排序（6 万点约 0.5 ms），骨骼没动时跳过排序；GPU 上把协方差投影成屏幕椭圆（EWA），四边形大小按不透明度截到 1/255，从后往前预乘混合。splat 风格不开 MSAA。
 - 真实拍摄的点云可以用 [Brush](https://github.com/ArthurBrussee/brush) 等工具重建，裁掉背景、对齐到模型后放进宠物包。`check` 会报告点数、排序耗时和多少点离网格太远（对齐错了或带了背景）。
-- 示例狐狸的 `splats.ply` 是 `bake-splats` 从低多边形贴图生成的，只用来验证管线，画质不代表真实拍摄。
+- 示例狐狸的 `splats.ply` 是 `bake-splats` 从低多边形贴图生成的，只用来验证管线。
+- `photo` 风格用一张 4K 照片生成（[来源和流程](pets/fox/reference/README.md)）：Vision 抠图 → Apple SHARP 单图生成 → `tools/crop_splats.py` 裁背景 → `deskpet align-splats` 自动对齐到骨骼。单图看不到另一侧，转到背面会露馅；SHARP 权重仅限研究用途，这份点云不能随产品发布。
+
+![照片点云绑到狐狸骨骼上的联系表](docs/photo-splats.png)
 
 ## 素材授权
 

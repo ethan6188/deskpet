@@ -92,7 +92,8 @@ mesh. The glTF still provides skeleton, clips and click-through.
   `[styles.splat]`. It proves the pipeline; it doesn't look better than the mesh.
 - With a capture (e.g. trained with Brush): crop the background first, copy the `.ply` into the package,
   set `splats = "file.ply"`, then fit `splat_scale`, `splat_rotate` (degrees X, Y, Z) and `splat_offset`
-  until the splat turntable lines up with the `real` turntable. `check` says what share of splats sit far
+  until the splat turntable lines up with the `real` turntable; `deskpet align-splats pets/<name> --style <style>`
+  fits them automatically and writes them into `pet.toml`. `check` says what share of splats sit far
   from the mesh: above 1% the alignment is wrong or background is left.
 - Keep under 300k splats; `check` prints the CPU sort time per frame.
 

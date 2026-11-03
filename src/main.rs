@@ -327,6 +327,9 @@ usage:
       Check a pet package. Exit status 1 on errors, 0 otherwise.
   deskpet new DIR --model FILE.glb [--name NAME]
       Make a pet package from a glTF binary, with guessed settings to confirm.
+  deskpet align-splats DIR --style NAME
+      Fit splat_scale, splat_rotate and splat_offset of a splat style to the
+      model and write them into pet.toml.
   deskpet bake-splats DIR [--count N] [--out FILE.ply]
       Cover the model with Gaussian splats colored by its textures, to try the
       splat style before a real capture exists. Adds a [styles.splat] if missing.";
@@ -517,10 +520,67 @@ fn bake_splats(dir: PathBuf, flags: Vec<(String, String)>) {
     );
 }
 
+fn align_splats(dir: PathBuf, flags: Vec<(String, String)>) {
+    let mut name = None;
+    for (k, v) in flags {
+        match k.as_str() {
+            "--style" => name = Some(v),
+            _ => usage(),
+        }
+    }
+    let name = name.unwrap_or_else(|| usage());
+    let pet = Pet::open(&dir).unwrap_or_else(|e| fail(e));
+    let style = pet.style(Some(&name)).unwrap_or_else(|e| fail(e));
+    let file = style
+        .splats
+        .clone()
+        .unwrap_or_else(|| fail(format!("style \"{name}\" has no splats")));
+    let model = model::load(&pet.model_path()).unwrap_or_else(|e| fail(e));
+    let splats = splat::load_ply(&dir.join(file)).unwrap_or_else(|e| fail(e));
+    let (a, yaw, err) = splat::fit_alignment(&model, &splats);
+    let toml = dir.join("pet.toml");
+    let text = std::fs::read_to_string(&toml).unwrap_or_else(|e| fail(e.to_string()));
+    let header = format!("[styles.{name}]");
+    let start = text
+        .find(&header)
+        .unwrap_or_else(|| fail(format!("no {header} in pet.toml")));
+    let end = text[start + header.len()..]
+        .find("\n[")
+        .map_or(text.len(), |i| start + header.len() + i);
+    let section: String = text[start..end]
+        .lines()
+        .filter(|l| {
+            !l.starts_with("splat_scale")
+                && !l.starts_with("splat_rotate")
+                && !l.starts_with("splat_offset")
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let fitted = format!(
+        "{}splat_scale = {:.3}\nsplat_rotate = [0, {:.0}, 0]\nsplat_offset = [{:.2}, {:.2}, {:.2}]\n",
+        section.trim_end_matches('\n').to_string() + "\n",
+        a.scale,
+        yaw,
+        a.offset.x,
+        a.offset.y,
+        a.offset.z
+    );
+    let out = format!("{}{}{}", &text[..start], fitted, &text[end..]);
+    std::fs::write(&toml, out).unwrap_or_else(|e| fail(e.to_string()));
+    println!(
+        "{name}: scale {:.3}, heading {yaw:.0} degrees, offset ({:.2}, {:.2}, {:.2}); median splat-to-mesh distance {:.1}% of height",
+        a.scale,
+        a.offset.x,
+        a.offset.y,
+        a.offset.z,
+        err * 100.0
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1).peekable();
     let command = match args.peek().map(String::as_str) {
-        Some("run" | "render" | "check" | "new" | "bake-splats") => args.next(),
+        Some("run" | "render" | "check" | "new" | "bake-splats" | "align-splats") => args.next(),
         _ => None,
     };
     let (positional, flags) = split_args(args, &["--json"]);
@@ -533,6 +593,7 @@ fn main() {
         Some("render") => render_sheet(one_dir(positional), flags),
         Some("check") => check_pet(one_dir(positional), flags),
         Some("new") => new_pet(one_dir(positional), flags),
+        Some("align-splats") => align_splats(one_dir(positional), flags),
         Some("bake-splats") => bake_splats(one_dir(positional), flags),
         _ => usage(),
     }

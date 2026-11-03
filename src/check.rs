@@ -132,6 +132,40 @@ pub fn run(dir: &Path, window_scale: f32) -> Findings {
         }
     };
     let tris = model.indices.len() / 3;
+    // Rest-pose box: what splat_scale, splat_rotate and splat_offset align to.
+    let rest = pose::skinned_positions(&model, &Pose::rest(&model));
+    let (lo, hi) = rest.iter().fold(
+        (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)),
+        |(l, h), p| (l.min(*p), h.max(*p)),
+    );
+    let head = pet
+        .manifest
+        .rig
+        .head
+        .as_deref()
+        .and_then(|n| model.node(n))
+        .map(|n| {
+            pose::world_matrices(&model, &Pose::rest(&model))[n]
+                .w_axis
+                .truncate()
+        });
+    f.add(
+        Level::Ok,
+        "rest pose",
+        format!(
+            "box x {:.2}..{:.2}, y {:.2}..{:.2}, z {:.2}..{:.2}{}",
+            lo.x,
+            hi.x,
+            lo.y,
+            hi.y,
+            lo.z,
+            hi.z,
+            head.map_or(String::new(), |h| format!(
+                "; head at ({:.2}, {:.2}, {:.2})",
+                h.x, h.y, h.z
+            ))
+        ),
+    );
     f.add(
         Level::Ok,
         "model",
@@ -360,6 +394,7 @@ fn check_cost(pet: &Pet, model: &Model, window_scale: f32, f: &mut Findings) {
         };
         if !splats.is_empty() {
             check_splats(name, &splats, height, edge_p95(model), f);
+            check_splat_rig(pet, model, name, &splats, f);
         }
         let camera = scene::framing(model, style, facing, scene::splat_reach(&splats));
         let h = (pet.manifest.height * window_scale).round() as u32;
@@ -497,4 +532,61 @@ fn edge_p95(model: &Model) -> f32 {
     }
     let k = e.len() * 95 / 100;
     *e.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
+}
+
+/// Share of splats that follow the head. Near zero means the splats are
+/// misaligned: the head will turn and the photo won't.
+fn check_splat_rig(pet: &Pet, model: &Model, name: &str, splats: &[Splat], f: &mut Findings) {
+    let Some(head) = pet.manifest.rig.head.as_deref().and_then(|n| model.node(n)) else {
+        return;
+    };
+    let under_head = |mut n: usize| loop {
+        if n == head {
+            return true;
+        }
+        match model.nodes[n].parent {
+            Some(p) => n = p,
+            None => return false,
+        }
+    };
+    let on_head = splats
+        .iter()
+        .filter(|s| {
+            let k = (0..4)
+                .max_by(|a, b| s.weights[*a].total_cmp(&s.weights[*b]))
+                .unwrap_or(0);
+            under_head(model.palette[s.joints[k] as usize].node)
+        })
+        .count();
+    let share = on_head as f32 / splats.len().max(1) as f32;
+    let mesh = model
+        .vertices
+        .iter()
+        .filter(|v| {
+            let k = (0..4)
+                .max_by(|a, b| v.weights[*a].total_cmp(&v.weights[*b]))
+                .unwrap_or(0);
+            under_head(model.palette[v.joints[k] as usize].node)
+        })
+        .count() as f32
+        / model.vertices.len().max(1) as f32;
+    let level = if share < mesh * 0.3 {
+        Level::Warn
+    } else {
+        Level::Ok
+    };
+    f.add(
+        level,
+        "splats",
+        format!(
+            "style \"{name}\": {:.1}% of splats follow the head (mesh: {:.1}%){}",
+            share * 100.0,
+            mesh * 100.0,
+            if level == Level::Warn {
+                "; the head is probably misaligned"
+            } else {
+                ""
+            }
+        ),
+    );
 }

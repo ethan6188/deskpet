@@ -32,3 +32,12 @@ glow = [1.0, 0.9, 0.8]
 [styles.splat]
 kind = "splat"
 splats = "splats.ply"
+
+# Photographic splats made from reference/fox-4k.jpg with SHARP (single image,
+# so the far side is guessed). See reference/README.md.
+[styles.photo]
+kind = "splat"
+splats = "photo-splats.ply"
+splat_scale = 82.455
+splat_rotate = [0, 80, 0]
+splat_offset = [6.70, -6.53, 3.53]
